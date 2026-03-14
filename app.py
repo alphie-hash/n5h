@@ -250,15 +250,69 @@ def save_connections(connections):
     with open(CONTACTS_FILE, "w") as f:
         json.dump(connections, f, indent=2)
 
+# Location aliases — common abbreviations map to full names for fuzzy matching
+LOCATION_ALIASES = {
+    "sf": ["san francisco", "sf", "bay area"],
+    "san francisco": ["san francisco", "sf", "bay area"],
+    "bay area": ["san francisco", "sf", "bay area", "oakland", "san jose", "palo alto", "mountain view", "sunnyvale", "berkeley", "fremont"],
+    "nyc": ["new york", "nyc", "brooklyn", "manhattan"],
+    "new york": ["new york", "nyc", "brooklyn", "manhattan"],
+    "la": ["los angeles", "la", "santa monica", "pasadena", "hollywood"],
+    "los angeles": ["los angeles", "la", "santa monica", "pasadena", "hollywood"],
+    "dc": ["washington", "dc", "d.c."],
+    "washington": ["washington", "dc", "d.c."],
+    "london": ["london", "uk", "united kingdom"],
+    "seattle": ["seattle", "wa", "washington"],
+    "austin": ["austin", "tx", "texas"],
+    "chicago": ["chicago", "il"],
+    "boston": ["boston", "ma", "cambridge"],
+    "denver": ["denver", "co", "colorado", "boulder"],
+    "toronto": ["toronto", "on", "ontario"],
+    "berlin": ["berlin", "germany"],
+    "bangalore": ["bangalore", "bengaluru", "india"],
+}
+
+def _location_matches(profile_location, query_loc):
+    """Fuzzy location match — checks aliases and substring."""
+    if not profile_location or not query_loc:
+        return False
+    prof_lower = profile_location.lower()
+    q_lower = query_loc.lower().strip()
+    # Direct substring match
+    if q_lower in prof_lower:
+        return True
+    # Normalized match: strip spaces/punctuation
+    prof_norm = prof_lower.replace(" ", "").replace(",", "").replace("-", "").replace(".", "")
+    q_norm = q_lower.replace(" ", "").replace(",", "").replace("-", "").replace(".", "")
+    if q_norm in prof_norm:
+        return True
+    # Check aliases — try exact key, then normalized key
+    aliases = LOCATION_ALIASES.get(q_lower, [])
+    if not aliases:
+        for key, vals in LOCATION_ALIASES.items():
+            if key.replace(" ", "") == q_norm:
+                aliases = vals
+                break
+    if aliases:
+        return any(alias in prof_lower for alias in aliases)
+    return False
+
 def search_connections(connections, query="", location="", company="", title=""):
     results = connections
     if query.strip():
-        q = query.lower().strip()
-        results = [c for c in results if q in c.get("name", "").lower() or q in c.get("email", "").lower()
-                   or q in c.get("title", "").lower() or q in c.get("company", "").lower()]
+        # Split query into keywords — match ANY keyword against name/email/title/company
+        keywords = [k.lower().strip() for k in query.lower().strip().split() if k.strip()]
+        def _matches_query(c):
+            haystack = " ".join([
+                c.get("name", ""), c.get("email", ""),
+                c.get("title", ""), c.get("company", ""),
+                c.get("bio", ""), c.get("skills", ""),
+            ]).lower()
+            return any(kw in haystack for kw in keywords)
+        results = [c for c in results if _matches_query(c)]
     if location.strip():
-        loc = location.lower().strip()
-        results = [c for c in results if loc in c.get("location", "").lower()]
+        # Use fuzzy location matching with aliases (same as GitHub search)
+        results = [c for c in results if _location_matches(c.get("location", ""), location)]
     if company.strip():
         comp = company.lower().strip()
         results = [c for c in results if comp in c.get("company", "").lower()]
@@ -915,53 +969,6 @@ if search_mode == "👤 User Search":
     with r2d:
         min_followers_val = st.number_input("Min followers", min_value=0, value=0, step=50)
     sel_languages = []
-
-    # Location aliases — common abbreviations map to full names for fuzzy matching
-    LOCATION_ALIASES = {
-        "sf": ["san francisco", "sf", "bay area"],
-        "san francisco": ["san francisco", "sf", "bay area"],
-        "bay area": ["san francisco", "sf", "bay area", "oakland", "san jose", "palo alto", "mountain view", "sunnyvale", "berkeley", "fremont"],
-        "nyc": ["new york", "nyc", "brooklyn", "manhattan"],
-        "new york": ["new york", "nyc", "brooklyn", "manhattan"],
-        "la": ["los angeles", "la", "santa monica", "pasadena", "hollywood"],
-        "los angeles": ["los angeles", "la", "santa monica", "pasadena", "hollywood"],
-        "dc": ["washington", "dc", "d.c."],
-        "washington": ["washington", "dc", "d.c."],
-        "london": ["london", "uk", "united kingdom"],
-        "seattle": ["seattle", "wa", "washington"],
-        "austin": ["austin", "tx", "texas"],
-        "chicago": ["chicago", "il"],
-        "boston": ["boston", "ma", "cambridge"],
-        "denver": ["denver", "co", "colorado", "boulder"],
-        "toronto": ["toronto", "on", "ontario"],
-        "berlin": ["berlin", "germany"],
-        "bangalore": ["bangalore", "bengaluru", "india"],
-    }
-
-    def _location_matches(profile_location, query_loc):
-        """Fuzzy location match — checks aliases and substring."""
-        if not profile_location or not query_loc:
-            return False
-        prof_lower = profile_location.lower()
-        q_lower = query_loc.lower().strip()
-        # Direct substring match
-        if q_lower in prof_lower:
-            return True
-        # Normalized match: strip spaces/punctuation (catches "sanfrancisco" → "San Francisco")
-        prof_norm = prof_lower.replace(" ", "").replace(",", "").replace("-", "").replace(".", "")
-        q_norm = q_lower.replace(" ", "").replace(",", "").replace("-", "").replace(".", "")
-        if q_norm in prof_norm:
-            return True
-        # Check aliases — try exact key, then normalized key
-        aliases = LOCATION_ALIASES.get(q_lower, [])
-        if not aliases:
-            for key, vals in LOCATION_ALIASES.items():
-                if key.replace(" ", "") == q_norm:
-                    aliases = vals
-                    break
-        if aliases:
-            return any(alias in prof_lower for alias in aliases)
-        return False
 
     def build_user_query(include_location=True):
         """Build GitHub search query — location IN query for best results."""

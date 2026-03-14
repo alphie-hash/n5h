@@ -19,6 +19,7 @@ NOTES_FILE    = os.path.join(DATA_DIR, "notes.json")
 SAVES_FILE    = os.path.join(DATA_DIR, "saved_searches.json")
 CACHE_FILE    = os.path.join(DATA_DIR, "profile_cache.json")
 PIPELINE_FILE = os.path.join(DATA_DIR, "pipeline.json")
+PROJECTS_FILE = os.path.join(DATA_DIR, "projects.json")
 CONTACTS_FILE = os.path.join(DATA_DIR, "connections.json")
 CONNECTION_CSVS = [
     os.path.join(DATA_DIR, "kush_connections.csv"),
@@ -128,30 +129,98 @@ def get_user_profile_cached(username):
     return profile
 
 # ─────────────────────────────────────────────
-# Pipeline CRM
+# Pipeline CRM — Multi-Project
 # ─────────────────────────────────────────────
-@st.cache_data(ttl=10, show_spinner=False)
-def _load_pipeline_cached(mtime):
-    if os.path.exists(PIPELINE_FILE):
+def _migrate_legacy_pipeline():
+    """One-time migration: pipeline.json → projects.json."""
+    if os.path.exists(PIPELINE_FILE) and not os.path.exists(PROJECTS_FILE):
         try:
             with open(PIPELINE_FILE) as f:
+                old_data = json.load(f)
+        except Exception:
+            old_data = {}
+        data = {
+            "_version": 2,
+            "_active": "Default",
+            "projects": {
+                "Default": {"created": time.strftime("%d %b %Y"), "candidates": old_data}
+            }
+        }
+        with open(PROJECTS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+
+@st.cache_data(ttl=10, show_spinner=False)
+def _load_projects_cached(mtime):
+    if os.path.exists(PROJECTS_FILE):
+        try:
+            with open(PROJECTS_FILE) as f:
                 return json.load(f)
         except Exception:
-            return {}
-    return {}
+            return None
+    return None
+
+def _save_projects(data):
+    with open(PROJECTS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+def load_projects():
+    _migrate_legacy_pipeline()
+    mtime = os.path.getmtime(PROJECTS_FILE) if os.path.exists(PROJECTS_FILE) else 0
+    data = _load_projects_cached(mtime)
+    if not data:
+        data = {
+            "_version": 2, "_active": "Default",
+            "projects": {"Default": {"created": time.strftime("%d %b %Y"), "candidates": {}}}
+        }
+        _save_projects(data)
+    return data
+
+def get_active_project_name(data):
+    return data.get("_active", "Default")
+
+def get_active_pipeline(data):
+    """Returns candidates dict for active project — drop-in for old load_pipeline()."""
+    name = get_active_project_name(data)
+    project = data.get("projects", {}).get(name)
+    if not project:
+        return {}
+    return project.get("candidates", {})
 
 def load_pipeline():
-    mtime = os.path.getmtime(PIPELINE_FILE) if os.path.exists(PIPELINE_FILE) else 0
-    return _load_pipeline_cached(mtime)
+    """Backward-compat wrapper — returns active project's pipeline."""
+    return get_active_pipeline(load_projects())
 
 def update_pipeline(username, stage):
-    pipeline = load_pipeline()
+    """Update candidate stage within active project."""
+    data = load_projects()
+    active = get_active_project_name(data)
+    project = data["projects"].setdefault(active, {"created": time.strftime("%d %b %Y"), "candidates": {}})
     if stage == "New":
-        pipeline.pop(username, None)
+        project["candidates"].pop(username, None)
     else:
-        pipeline[username] = {"stage": stage, "updated": time.strftime("%d %b %Y")}
-    with open(PIPELINE_FILE, "w") as f:
-        json.dump(pipeline, f, indent=2)
+        project["candidates"][username] = {"stage": stage, "updated": time.strftime("%d %b %Y")}
+    _save_projects(data)
+
+def create_project(name):
+    data = load_projects()
+    if name.strip() and name not in data["projects"]:
+        data["projects"][name] = {"created": time.strftime("%d %b %Y"), "candidates": {}}
+    data["_active"] = name
+    _save_projects(data)
+
+def set_active_project(name):
+    data = load_projects()
+    if name in data["projects"]:
+        data["_active"] = name
+        _save_projects(data)
+
+def delete_project(name):
+    data = load_projects()
+    if name in data["projects"] and len(data["projects"]) > 1:
+        del data["projects"][name]
+        if data["_active"] == name:
+            data["_active"] = next(iter(data["projects"]))
+        _save_projects(data)
 
 # ─────────────────────────────────────────────
 # Connections / My Network
@@ -852,14 +921,44 @@ with st.sidebar:
         st.error("❌ OpenAI key missing")
     st.divider()
 
-    # Pipeline summary
-    pipeline_data = load_pipeline()
+    # Projects & Pipeline
+    projects_data = load_projects()
+    project_names = list(projects_data.get("projects", {}).keys())
+    active_name = get_active_project_name(projects_data)
+    active_idx = project_names.index(active_name) if active_name in project_names else 0
+
+    st.markdown("### 📁 Projects")
+    selected_project = st.selectbox("Active Project", project_names, index=active_idx, key="project_selector", label_visibility="collapsed")
+    if selected_project != active_name:
+        set_active_project(selected_project)
+        st.rerun()
+
+    # Create new project
+    with st.expander("➕ New Project"):
+        new_proj_name = st.text_input("Project name", key="new_proj_input", placeholder="e.g. Inferra ML Engineer")
+        if st.button("Create", key="create_proj_btn", use_container_width=True):
+            if new_proj_name.strip():
+                create_project(new_proj_name.strip())
+                st.rerun()
+            else:
+                st.warning("Enter a project name")
+
+    # Delete project
+    if len(project_names) > 1:
+        if st.button(f"🗑️ Delete '{selected_project}'", key="del_proj_btn", use_container_width=True):
+            delete_project(selected_project)
+            st.rerun()
+
+    # Pipeline summary for active project
+    pipeline_data = get_active_pipeline(projects_data)
     if pipeline_data:
-        st.markdown("### 📊 Pipeline")
+        st.markdown("#### 📊 Pipeline")
         stage_counts = {}
         for v in pipeline_data.values():
             s = v.get("stage", "New")
             stage_counts[s] = stage_counts.get(s, 0) + 1
+        total_in_project = len(pipeline_data)
+        st.caption(f"{total_in_project} candidate{'s' if total_in_project != 1 else ''} in project")
         for s in PIPELINE_STAGES[1:]:
             count = stage_counts.get(s, 0)
             if count:
@@ -869,7 +968,7 @@ with st.sidebar:
                     f'color:{colour};font-size:0.85rem;"><span>{s}</span><strong>{count}</strong></div>',
                     unsafe_allow_html=True,
                 )
-        st.divider()
+    st.divider()
 
     # Filters
     if "results" in st.session_state and st.session_state["results"]:

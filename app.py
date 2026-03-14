@@ -524,28 +524,61 @@ def generate_outreach(profile, role, repos):
     from openai import OpenAI
     client    = OpenAI(api_key=OPENAI_API_KEY)
     name      = profile.get("name") or profile.get("login")
+    first     = name.split()[0] if name and " " in name else name
     bio       = profile.get("bio") or "N/A"
-    repo_names = ", ".join([r["name"] for r in repos[:3]]) if repos else "various open source projects"
-    prompt = f"""You are a senior technical recruiter at a top-tier tech staffing agency.
-Write a short, personalised cold outreach message to a developer you found on GitHub.
-Developer profile:
+    company   = profile.get("company") or "N/A"
+    location  = profile.get("location") or "N/A"
+    repo_details = []
+    for r in repos[:5]:
+        desc = r.get("description") or ""
+        lang = r.get("language") or ""
+        stars = r.get("stargazers_count", 0)
+        repo_details.append(f"{r['name']} ({lang}, {stars}★): {desc}")
+    repo_str = "\n".join(repo_details) if repo_details else "N/A"
+    prompt = f"""You are Alphie, an intern at Number Five House (N5H), drafting a cold outreach email to a developer found on GitHub. You work for Lucas Partington who leads recruiting at N5H. N5H builds teams for world-class tech ventures.
+
+CANDIDATE PROFILE:
 - Name: {name}
 - Bio: {bio}
-- Notable repositories: {repo_names}
-- Public repos: {profile.get("public_repos", 0)}
+- Company: {company}
+- Location: {location}
 - Followers: {profile.get("followers", 0)}
-Role we are hiring for: {role}
-Instructions:
-- Open by referencing ONE specific piece of their actual work
-- Briefly describe the opportunity in 1 sentence
-- Keep total message under 100 words
-- Tone: warm, genuine, peer-to-peer
-- End with a soft call to action
-- Do NOT use placeholders like [Company Name]"""
+- Public repos: {profile.get("public_repos", 0)}
+- Top repositories:
+{repo_str}
+
+ROLE WE ARE SOURCING FOR: {role}
+
+OUTREACH FORMULA (follow this structure exactly):
+
+1. SUBJECT LINE: Short, specific to their work — not generic.
+
+2. INTRO: "Hi {first}," then:
+   "My name is Alphie. I'm an intern working for Lucas Partington at Number Five House (N5H). We build teams for world-class tech ventures."
+
+3. GOLDEN NUGGETS: Prove you deeply read their profile. Reference 1-2 HIGHLY SPECIFIC things from their repos, bio, or work. Name actual repo names, technologies, or patterns you noticed in their code. Be specific like "I've been looking at your work on [repo] — specifically how you [technical detail]". NEVER be generic like "You have a great background in X."
+
+4. THE HOOK: Pitch the opportunity and why it's compelling. Connect it to what makes this venture exciting. Frame the mission, not just the job title.
+
+5. WHY YOU: Connect their golden nuggets directly to the problem. Frame them as an essential system owner, not just an employee.
+
+6. CTA: End with exactly:
+   "Lucas Partington would love 15 mins to discuss. The easiest next step is to book time w/ Lucas. Or WhatsApp: +14155199582.
+
+   Thanks,
+   Alphie"
+
+STRICT VOCABULARY RULES:
+- NEVER use: "founding crew", "zero-to-one leader", "exciting opportunity", "passionate about", "rockstar", "ninja"
+- USE INSTEAD: "core crew", "ground-up engineering leader"
+- Tone: approachable, professional, intern-like warmth, genuine curiosity
+- Total message: under 200 words
+- Do NOT use any placeholders like [Company Name] — if venture details are unknown, describe the opportunity based on the role"""
+
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=200,
+        max_tokens=500,
     )
     return resp.choices[0].message.content
 
@@ -1413,13 +1446,22 @@ elif search_mode == "📇 My Network":
                             with st.spinner("Writing..."):
                                 from openai import OpenAI
                                 client = OpenAI(api_key=OPENAI_API_KEY)
+                                c_name = conn.get('name', 'there')
+                                c_first = c_name.split()[0] if ' ' in c_name else c_name
                                 prompt = (
-                                    f"Write a short, personalised outreach message to {conn.get('name')}.\n"
-                                    f"Their role: {conn.get('title', 'N/A')} at {conn.get('company', 'N/A')}.\n"
-                                    f"Location: {conn.get('location', 'N/A')}.\n"
-                                    f"Relationship: {conn.get('relationship', 'unknown')}.\n"
-                                    f"Keep it under 80 words, warm, genuine. Reference their work if possible.\n"
-                                    f"End with a soft call to action. No placeholders."
+                                    f"You are Alphie, an intern at Number Five House (N5H), drafting a cold outreach email. "
+                                    f"You work for Lucas Partington who leads recruiting at N5H. N5H builds teams for world-class tech ventures.\n\n"
+                                    f"CANDIDATE: {c_name}\n"
+                                    f"Role: {conn.get('title', 'N/A')} at {conn.get('company', 'N/A')}\n"
+                                    f"Location: {conn.get('location', 'N/A')}\n"
+                                    f"Relationship: {conn.get('relationship', 'unknown')}\n\n"
+                                    f"FORMULA:\n"
+                                    f"1. Open with: 'Hi {c_first},' then 'My name is Alphie. I'm an intern working for Lucas Partington at Number Five House (N5H). We build teams for world-class tech ventures.'\n"
+                                    f"2. Reference something SPECIFIC about their role/company as a golden nugget — show you researched them.\n"
+                                    f"3. Pitch the opportunity connected to their background.\n"
+                                    f"4. End with: 'Lucas Partington would love 15 mins to discuss. Book time w/ Lucas or WhatsApp: +14155199582.\\n\\nThanks,\\nAlphie'\n\n"
+                                    f"RULES: Never use 'founding crew' or 'zero-to-one leader'. Use 'core crew' and 'ground-up engineering leader' instead. "
+                                    f"Tone: approachable, professional, intern-like warmth. Under 150 words. No placeholders."
                                 )
                                 resp = client.chat.completions.create(
                                     model="gpt-4o-mini",

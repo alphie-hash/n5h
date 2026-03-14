@@ -677,7 +677,12 @@ if search_mode == "👤 User Search":
         for lang in sel_languages:
             parts.append(f"language:{lang}")
         if location_query.strip():
-            parts.append(f"location:{location_query.strip()}")
+            loc = location_query.strip()
+            # Quote multi-word locations for GitHub search
+            if " " in loc:
+                parts.append(f'location:"{loc}"')
+            else:
+                parts.append(f"location:{loc}")
         if SENIORITY_MAP[seniority]:
             parts.append(SENIORITY_MAP[seniority])
         elif min_followers_val > 0:

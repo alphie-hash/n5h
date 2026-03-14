@@ -7,6 +7,7 @@ import os
 import time
 from datetime import datetime
 from urllib.parse import quote
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -445,8 +446,9 @@ def get_user_repos(username, max_repos=6):
         return r.json()
     return []
 
-def get_user_languages(username):
-    repos = get_user_repos(username, max_repos=10)
+def get_user_languages(username, repos=None):
+    if repos is None:
+        repos = get_user_repos(username, max_repos=10)
     lang_count = {}
     for repo in repos:
         lang = repo.get("language")
@@ -974,27 +976,25 @@ if search_mode == "👤 User Search":
             st.warning("Add at least one filter to search.")
             st.stop()
 
-        # Hybrid strategy: search WITH location in GitHub query for targeted results
-        # GitHub Search API returns up to 1000 results (10 pages × 100)
+        # Location is in the GitHub query — no need to over-fetch
         has_location = bool(location_query.strip())
         has_company = bool(company_query.strip())
-        # Over-fetch to ensure enough candidates after company post-filter
+        # Only over-fetch if company post-filter is active
         if has_company:
-            fetch_pool = min(max_candidates * 5, 1000)
+            fetch_pool = min(max_candidates * 3, 300)
         else:
-            fetch_pool = min(max_candidates * 2, 1000)
+            fetch_pool = max_candidates
 
         with st.spinner("Searching GitHub users…"):
-            # Primary search: with location in query (GitHub filters server-side)
             users, api_err = search_users_direct(final_query, fetch_pool)
             if api_err and not users:
                 st.error(api_err)
                 st.stop()
 
-            # If we still don't have enough, try broader search + local post-filter
+            # Fallback: if location query returned too few, broaden search
             if has_location and len(users) < max_candidates:
                 broad_query = build_user_query(include_location=False)
-                broad_pool = min(max_candidates * 5, 1000)
+                broad_pool = min(max_candidates * 3, 300)
                 broad_users, _ = search_users_direct(broad_query, broad_pool)
                 seen = {u["login"] for u in users}
                 for u in broad_users:
@@ -1006,29 +1006,49 @@ if search_mode == "👤 User Search":
             st.warning("No users found. Try broader filters.")
             st.stop()
 
+        # ── Parallel profile fetching (10 threads) — ~10× faster ──
         st.markdown(f"### Fetching {len(users)} profiles…")
         prog = st.progress(0)
-        candidates = []
-        for i, user in enumerate(users):
+        cache = _load_cache()  # Load cache ONCE
+
+        def _fetch_one(user):
+            """Fetch profile + repos for a single user (runs in thread)."""
             username = user["login"]
-            profile  = get_user_profile_cached(username)
+            # Check cache first
+            entry = cache.get(username)
+            if entry and time.time() - entry.get("ts", 0) < CACHE_TTL:
+                profile = entry["data"]
+            else:
+                profile = _fetch_user_profile(username)
+                if profile:
+                    cache[username] = {"ts": time.time(), "data": profile}
             if not profile:
-                prog.progress((i + 1) / len(users))
-                continue
+                return None
             user_repos = get_user_repos(username)
-            languages  = get_user_languages(username)
-            entry = {
+            languages = get_user_languages(username, repos=user_repos)
+            return {
                 "contributor": {"contributions": 0, "login": username},
-                "profile":     profile,
-                "user_repos":  user_repos,
-                "languages":   languages,
-                "score":       None,
-                "reason":      "",
+                "profile": profile,
+                "user_repos": user_repos,
+                "languages": languages,
+                "score": None,
+                "reason": "",
             }
-            candidates.append(entry)
-            prog.progress((i + 1) / len(users))
-            time.sleep(0.05)
+
+        candidates = []
+        done = 0
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(_fetch_one, u): u for u in users}
+            for future in as_completed(futures):
+                done += 1
+                prog.progress(done / len(users))
+                result = future.result()
+                if result:
+                    candidates.append(result)
         prog.empty()
+
+        # Save cache once at the end (not per-profile)
+        _save_cache(cache)
 
         total_fetched = len(candidates)
 

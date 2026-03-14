@@ -18,6 +18,12 @@ NOTES_FILE    = os.path.join(DATA_DIR, "notes.json")
 SAVES_FILE    = os.path.join(DATA_DIR, "saved_searches.json")
 CACHE_FILE    = os.path.join(DATA_DIR, "profile_cache.json")
 PIPELINE_FILE = os.path.join(DATA_DIR, "pipeline.json")
+CONTACTS_FILE = os.path.join(DATA_DIR, "connections.json")
+CONNECTION_CSVS = [
+    os.path.join(DATA_DIR, "kush_connections.csv"),
+    os.path.join(DATA_DIR, "yash_connections.csv"),
+    os.path.join(DATA_DIR, "inferra_pipeline.csv"),
+]
 os.makedirs(DATA_DIR, exist_ok=True)
 
 CACHE_TTL = 86400  # 24 hours
@@ -135,6 +141,134 @@ def update_pipeline(username, stage):
         pipeline[username] = {"stage": stage, "updated": time.strftime("%d %b %Y")}
     with open(PIPELINE_FILE, "w") as f:
         json.dump(pipeline, f, indent=2)
+
+# ─────────────────────────────────────────────
+# Connections / My Network
+# ─────────────────────────────────────────────
+def _get(row, *keys, default=""):
+    """Try multiple column names, return first non-empty value."""
+    for k in keys:
+        v = row.get(k, "").strip() if k in row else ""
+        if v:
+            return v
+    return default
+
+def parse_connections_csv_file(filepath):
+    """Parse a CSV file from disk into connection dicts."""
+    try:
+        with open(filepath, encoding="utf-8", errors="ignore") as f:
+            return _parse_csv_rows(csv.DictReader(f))
+    except Exception:
+        return []
+
+def parse_connections_csv_bytes(file_bytes):
+    """Parse uploaded CSV bytes into connection dicts."""
+    text = file_bytes.decode("utf-8", errors="ignore")
+    return _parse_csv_rows(csv.DictReader(io.StringIO(text)))
+
+def _parse_csv_rows(reader):
+    connections = []
+    for row in reader:
+        # Build name from NAME or First+Last or PROFILE
+        name = _get(row, "NAME", "Name", "PROFILE", "name", "Full Name")
+        if not name:
+            first = _get(row, "First Name", "first name", "First", "FIRST NAME")
+            last  = _get(row, "Last Name", "last name", "Last", "LAST NAME")
+            name = f"{first} {last}".strip()
+        if not name:
+            continue
+
+        # Location: combine CITY + STATE, or use CITY alone
+        city  = _get(row, "CITY", "City", "city", "location", "Location")
+        state = _get(row, "STATE", "State", "state", "MEGA")
+        location = f"{city}, {state}" if city and state else city or state
+
+        connections.append({
+            "name":         name,
+            "email":        _get(row, "EMAIL", "Email", "email", "GMAIL", "PERSONAL"),
+            "phone":        _get(row, "PHONE", "Phone", "phone", "mobile"),
+            "location":     location,
+            "title":        _get(row, "TITLE", "Title", "title", "position", "Position"),
+            "company":      _get(row, "COMPANY", "Company", "company"),
+            "linkedin_url": _get(row, "URL", "Url", "url", "LinkedIn URL", "LINKEDIN"),
+            "owner":        _get(row, "OWNER", "Owner"),
+            "relationship": _get(row, "RELATIONSHIP", "Relationship"),
+            "tier":         _get(row, "PROFILE", "Tier", "tier"),  # WORLD-CLASS, STRONG, MAYBE
+            "pipeline":     _get(row, "PIPELINE 1", "STAGE", "Pipeline", "pipeline"),
+            "category":     _get(row, "CATEGORY", "Category"),
+            "connected":    _get(row, "CONNECTED", "Connected On"),
+        })
+    return connections
+
+def load_connections():
+    # Try cached JSON first
+    if os.path.exists(CONTACTS_FILE):
+        try:
+            with open(CONTACTS_FILE) as f:
+                data = json.load(f)
+                if data:
+                    return data
+        except Exception:
+            pass
+    # Auto-import from bundled CSVs on first run
+    all_conns = []
+    for csv_path in CONNECTION_CSVS:
+        if os.path.exists(csv_path):
+            all_conns.extend(parse_connections_csv_file(csv_path))
+    if all_conns:
+        all_conns = _dedupe_connections(all_conns)
+        save_connections(all_conns)
+    return all_conns
+
+def _dedupe_connections(connections):
+    seen = set()
+    unique = []
+    for c in connections:
+        key = c.get("name", "").lower().strip()
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(c)
+    return unique
+
+def save_connections(connections):
+    with open(CONTACTS_FILE, "w") as f:
+        json.dump(connections, f, indent=2)
+
+def search_connections(connections, query="", location="", company="", title=""):
+    results = connections
+    if query.strip():
+        q = query.lower().strip()
+        results = [c for c in results if q in c.get("name", "").lower() or q in c.get("email", "").lower()
+                   or q in c.get("title", "").lower() or q in c.get("company", "").lower()]
+    if location.strip():
+        loc = location.lower().strip()
+        results = [c for c in results if loc in c.get("location", "").lower()]
+    if company.strip():
+        comp = company.lower().strip()
+        results = [c for c in results if comp in c.get("company", "").lower()]
+    if title.strip():
+        t = title.lower().strip()
+        results = [c for c in results if t in c.get("title", "").lower()]
+    return results
+
+def find_connection_match(connections, name="", email=""):
+    if not connections:
+        return None
+    name_lower = (name or "").lower().strip()
+    email_lower = (email or "").lower().strip()
+    for c in connections:
+        if email_lower and email_lower == c.get("email", "").lower().strip():
+            return c
+        if name_lower and name_lower == c.get("name", "").lower().strip():
+            return c
+    return None
+
+def connection_badge():
+    return (
+        ' <span style="background:#2563eb22;color:#60a5fa;font-size:0.7rem;'
+        'font-weight:700;padding:3px 8px;border-radius:20px;border:1px solid #2563eb66;'
+        'vertical-align:middle;">🔗 IN YOUR NETWORK</span>'
+    )
 
 def pipeline_badge(stage):
     colour, bg = STAGE_STYLE.get(stage, ("#9ca3af", "rgba(156,163,175,0.08)"))
@@ -444,7 +578,7 @@ def build_csv(candidates, role):
 # ─────────────────────────────────────────────
 # Candidate Renderer
 # ─────────────────────────────────────────────
-def render_candidate(c, idx, role_query, pipeline):
+def render_candidate(c, idx, role_query, pipeline, connections=None):
     profile     = c["profile"]
     username    = profile["login"]
     user_repos  = c.get("user_repos", [])
@@ -473,7 +607,26 @@ def render_candidate(c, idx, role_query, pipeline):
                 'vertical-align:middle;">🟢 OPEN TO WORK</span>'
                 if profile.get("hireable") else ""
             )
-            st.markdown(f"### [{name}](https://github.com/{username}){otw_badge}", unsafe_allow_html=True)
+            # Cross-reference with connections
+            net_badge = ""
+            conn_match = None
+            if connections:
+                conn_match = find_connection_match(
+                    connections,
+                    name=profile.get("name") or "",
+                    email=profile.get("email") or "",
+                )
+                if conn_match:
+                    net_badge = connection_badge()
+            st.markdown(f"### [{name}](https://github.com/{username}){otw_badge}{net_badge}", unsafe_allow_html=True)
+            if conn_match:
+                conn_details = []
+                if conn_match.get("title"):   conn_details.append(conn_match["title"])
+                if conn_match.get("company"): conn_details.append(conn_match["company"])
+                if conn_match.get("phone"):   conn_details.append(f"📞 {conn_match['phone']}")
+                if conn_match.get("email"):   conn_details.append(f"✉️ {conn_match['email']}")
+                if conn_details:
+                    st.caption("**From your network:** " + "  ·  ".join(conn_details))
             if profile.get("bio"):
                 st.caption(profile["bio"])
 
@@ -628,6 +781,35 @@ with st.sidebar:
                 st.rerun()
         st.divider()
 
+    # Connections upload
+    st.markdown("### 📇 My Network")
+    existing_connections = load_connections()
+    if existing_connections:
+        st.markdown(f"**{len(existing_connections):,}** connections loaded")
+    uploaded = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
+    if uploaded:
+        new_connections = parse_connections_csv_bytes(uploaded.read())
+        if new_connections:
+            # Merge: deduplicate by name+email
+            existing_set = {(c["name"].lower(), c["email"].lower()) for c in existing_connections}
+            added = 0
+            for c in new_connections:
+                key = (c["name"].lower(), c["email"].lower())
+                if key not in existing_set:
+                    existing_connections.append(c)
+                    existing_set.add(key)
+                    added += 1
+            save_connections(existing_connections)
+            st.toast(f"Added {added} new connections ({len(existing_connections):,} total)", icon="📇")
+            st.rerun()
+        else:
+            st.warning("Couldn't parse CSV — check column headers.")
+    if existing_connections:
+        if st.button("🗑️ Clear all connections", use_container_width=True):
+            save_connections([])
+            st.rerun()
+    st.divider()
+
     st.markdown("**How it works**")
     st.markdown("1. Set filters & describe the role")
     st.markdown("2. N5H finds developers on GitHub")
@@ -636,7 +818,7 @@ with st.sidebar:
 
 # ── Search Mode ───────────────────────────────
 search_mode = st.radio(
-    "mode", ["👤 User Search", "📁 Repo Search"],
+    "mode", ["👤 User Search", "📁 Repo Search", "📇 My Network"],
     horizontal=True, label_visibility="collapsed",
 )
 st.markdown("")
@@ -768,7 +950,7 @@ if search_mode == "👤 User Search":
         st.session_state["loaded_role"] = score_label
 
 # ── Repo Search ───────────────────────────────
-else:
+elif search_mode == "📁 Repo Search":
     col1, col2 = st.columns([4, 1])
     with col1:
         role_query = st.text_input(
@@ -860,6 +1042,149 @@ else:
         st.session_state["results"]     = candidates
         st.session_state["loaded_role"] = role_query
 
+# ── My Network Search ─────────────────────────
+elif search_mode == "📇 My Network":
+    all_connections = load_connections()
+    if not all_connections:
+        st.info("📇 Upload a CSV in the sidebar to search your network.")
+    else:
+        st.markdown(f"**{len(all_connections):,} connections loaded**")
+
+        # Filters row 1
+        nc1, nc2, nc3 = st.columns([3, 1, 1])
+        with nc1:
+            net_query = st.text_input("Search name, email, title, or company", placeholder="e.g. software engineer")
+        with nc2:
+            # Get unique tiers for filter
+            all_tiers = sorted({c.get("tier","") for c in all_connections if c.get("tier","")})
+            net_tier = st.selectbox("Tier", ["All"] + all_tiers)
+        with nc3:
+            all_rels = sorted({c.get("relationship","") for c in all_connections if c.get("relationship","")})
+            net_rel = st.selectbox("Relationship", ["All"] + all_rels)
+
+        # Filters row 2
+        nc4, nc5, nc6, nc7 = st.columns([2, 2, 2, 1])
+        with nc4:
+            net_location = st.text_input("Location", placeholder="e.g. Bay Area", key="net_loc")
+        with nc5:
+            net_company = st.text_input("Company", placeholder="e.g. Meta", key="net_comp")
+        with nc6:
+            net_title = st.text_input("Job Title", placeholder="e.g. engineer", key="net_title")
+        with nc7:
+            net_sort = st.selectbox("Sort", ["Name", "Company", "Title", "Tier"])
+
+        # Apply filters
+        results = search_connections(all_connections, net_query, net_location, net_company, net_title)
+        if net_tier != "All":
+            results = [c for c in results if c.get("tier", "").upper() == net_tier.upper()]
+        if net_rel != "All":
+            results = [c for c in results if c.get("relationship", "").upper() == net_rel.upper()]
+
+        # Sort
+        if net_sort == "Company":
+            results = sorted(results, key=lambda c: c.get("company", "").lower())
+        elif net_sort == "Title":
+            results = sorted(results, key=lambda c: c.get("title", "").lower())
+        elif net_sort == "Tier":
+            tier_order = {"WORLD-CLASS": 0, "STRONG": 1, "MAYBE": 2, "": 3}
+            results = sorted(results, key=lambda c: tier_order.get(c.get("tier", "").upper(), 3))
+        else:
+            results = sorted(results, key=lambda c: c.get("name", "").lower())
+
+        st.divider()
+        st.markdown(f"**{len(results):,}** matches")
+
+        # Export filtered connections
+        if results:
+            conn_csv = io.StringIO()
+            writer = csv.writer(conn_csv)
+            writer.writerow(["Name", "Email", "Phone", "Location", "Job Title", "Company",
+                             "LinkedIn", "Tier", "Relationship", "Pipeline", "Owner"])
+            for c in results:
+                writer.writerow([c.get("name",""), c.get("email",""), c.get("phone",""),
+                                 c.get("location",""), c.get("title",""), c.get("company",""),
+                                 c.get("linkedin_url",""), c.get("tier",""), c.get("relationship",""),
+                                 c.get("pipeline",""), c.get("owner","")])
+            st.download_button("⬇️ Export Results", conn_csv.getvalue().encode("utf-8"),
+                               "n5h_connections.csv", "text/csv", use_container_width=True)
+        st.divider()
+
+        # Tier badge helper
+        def tier_badge(tier):
+            t = (tier or "").upper()
+            if t == "WORLD-CLASS":
+                return '<span style="background:#16a34a22;color:#4ade80;font-size:0.65rem;font-weight:700;padding:2px 8px;border-radius:12px;border:1px solid #16a34a66;">WORLD-CLASS</span>'
+            elif t == "STRONG":
+                return '<span style="background:#2563eb22;color:#60a5fa;font-size:0.65rem;font-weight:700;padding:2px 8px;border-radius:12px;border:1px solid #2563eb66;">STRONG</span>'
+            elif t == "MAYBE":
+                return '<span style="background:#f59e0b22;color:#fbbf24;font-size:0.65rem;font-weight:700;padding:2px 8px;border-radius:12px;border:1px solid #f59e0b66;">MAYBE</span>'
+            return ""
+
+        def rel_badge(rel):
+            r = (rel or "").upper()
+            colors = {"WARM": "#f97316", "STRONG": "#22c55e", "COLD": "#9ca3af"}
+            c = colors.get(r, "#666")
+            if r:
+                return f' <span style="color:{c};font-size:0.65rem;font-weight:600;">● {r}</span>'
+            return ""
+
+        # Render connection cards
+        page_size = 50
+        show_count = min(page_size, len(results))
+        for idx, conn in enumerate(results[:show_count]):
+            with st.container():
+                cc1, cc2, cc3 = st.columns([3, 2, 1])
+                with cc1:
+                    name_html = f"**{conn.get('name', 'Unknown')}**"
+                    badges = tier_badge(conn.get("tier")) + rel_badge(conn.get("relationship"))
+                    if conn.get("linkedin_url"):
+                        st.markdown(
+                            f"### [{conn['name']}]({conn['linkedin_url']}){badges}",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(f"### {conn['name']}{badges}", unsafe_allow_html=True)
+
+                    meta_parts = []
+                    if conn.get("title"):    meta_parts.append(conn["title"])
+                    if conn.get("company"):  meta_parts.append(f"🏢 {conn['company']}")
+                    if conn.get("location"): meta_parts.append(f"📍 {conn['location']}")
+                    if meta_parts:
+                        st.caption("  ·  ".join(meta_parts))
+
+                with cc2:
+                    contact_parts = []
+                    if conn.get("email"):
+                        contact_parts.append(f"✉️ [{conn['email']}](mailto:{conn['email']})")
+                    if conn.get("phone"):
+                        contact_parts.append(f"📞 {conn['phone']}")
+                    if conn.get("linkedin_url"):
+                        contact_parts.append(f"🔗 [LinkedIn]({conn['linkedin_url']})")
+                    if contact_parts:
+                        st.markdown("  \n".join(contact_parts))
+
+                    extra = []
+                    if conn.get("owner"):    extra.append(f"Owner: {conn['owner']}")
+                    if conn.get("pipeline"): extra.append(f"Pipeline: {conn['pipeline']}")
+                    if conn.get("connected"): extra.append(f"Connected: {conn['connected']}")
+                    if extra:
+                        st.caption("  ·  ".join(extra))
+
+                with cc3:
+                    conn_key = f"conn_{conn.get('name','').lower().replace(' ','_')}"
+                    pipeline_data_conn = load_pipeline()
+                    conn_stage = pipeline_data_conn.get(conn_key, {}).get("stage", "New")
+                    new_conn_stage = st.selectbox("Stage", PIPELINE_STAGES,
+                        index=PIPELINE_STAGES.index(conn_stage) if conn_stage in PIPELINE_STAGES else 0,
+                        key=f"cpipe_{idx}")
+                    if new_conn_stage != conn_stage:
+                        update_pipeline(conn_key, new_conn_stage)
+                        st.rerun()
+            st.divider()
+
+        if len(results) > show_count:
+            st.info(f"Showing first {show_count} of {len(results)} — use filters to narrow down.")
+
 # ── Results ───────────────────────────────────
 if "results" in st.session_state and st.session_state["results"]:
     role_query_active = st.session_state.get("loaded_role", "")
@@ -910,5 +1235,6 @@ if "results" in st.session_state and st.session_state["results"]:
     if not display:
         st.warning("No candidates match the current filters.")
     else:
+        all_connections = load_connections()
         for idx, c in enumerate(display):
-            render_candidate(c, idx, role_query_active, pipeline)
+            render_candidate(c, idx, role_query_active, pipeline, all_connections)

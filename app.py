@@ -1050,12 +1050,11 @@ elif search_mode == "📇 My Network":
     else:
         st.markdown(f"**{len(all_connections):,} connections loaded**")
 
-        # Filters row 1
+        # Filters row 1 — same layout as User Search
         nc1, nc2, nc3 = st.columns([3, 1, 1])
         with nc1:
-            net_query = st.text_input("Search name, email, title, or company", placeholder="e.g. software engineer")
+            net_query = st.text_input("Role / Keywords", placeholder='e.g. "engineering manager" OR "full stack"', key="net_q")
         with nc2:
-            # Get unique tiers for filter
             all_tiers = sorted({c.get("tier","") for c in all_connections if c.get("tier","")})
             net_tier = st.selectbox("Tier", ["All"] + all_tiers)
         with nc3:
@@ -1069,9 +1068,11 @@ elif search_mode == "📇 My Network":
         with nc5:
             net_company = st.text_input("Company", placeholder="e.g. Meta", key="net_comp")
         with nc6:
-            net_title = st.text_input("Job Title", placeholder="e.g. engineer", key="net_title")
+            net_title = st.text_input("Job Title", placeholder="e.g. Head of Engineering", key="net_title")
         with nc7:
-            net_sort = st.selectbox("Sort", ["Name", "Company", "Title", "Tier"])
+            net_sort = st.selectbox("Sort", ["Tier", "Name", "Company", "Title"])
+
+        search_net = st.button("🔍 Search Network", type="primary", use_container_width=True)
 
         # Apply filters
         results = search_connections(all_connections, net_query, net_location, net_company, net_title)
@@ -1081,109 +1082,187 @@ elif search_mode == "📇 My Network":
             results = [c for c in results if c.get("relationship", "").upper() == net_rel.upper()]
 
         # Sort
-        if net_sort == "Company":
+        tier_order = {"WORLD-CLASS": 0, "STRONG": 1, "MAYBE": 2, "": 3}
+        if net_sort == "Tier":
+            results = sorted(results, key=lambda c: tier_order.get(c.get("tier", "").upper(), 3))
+        elif net_sort == "Company":
             results = sorted(results, key=lambda c: c.get("company", "").lower())
         elif net_sort == "Title":
             results = sorted(results, key=lambda c: c.get("title", "").lower())
-        elif net_sort == "Tier":
-            tier_order = {"WORLD-CLASS": 0, "STRONG": 1, "MAYBE": 2, "": 3}
-            results = sorted(results, key=lambda c: tier_order.get(c.get("tier", "").upper(), 3))
         else:
             results = sorted(results, key=lambda c: c.get("name", "").lower())
 
+        # Header bar — same as Results section
         st.divider()
-        st.markdown(f"**{len(results):,}** matches")
-
-        # Export filtered connections
-        if results:
+        res_col, csv_col = st.columns([4, 1])
+        with res_col:
+            st.success(f"**{len(results):,} connections** match your filters")
+        with csv_col:
             conn_csv = io.StringIO()
             writer = csv.writer(conn_csv)
             writer.writerow(["Name", "Email", "Phone", "Location", "Job Title", "Company",
-                             "LinkedIn", "Tier", "Relationship", "Pipeline", "Owner"])
+                             "LinkedIn", "Tier", "Relationship", "Pipeline", "Owner", "Connected"])
             for c in results:
                 writer.writerow([c.get("name",""), c.get("email",""), c.get("phone",""),
                                  c.get("location",""), c.get("title",""), c.get("company",""),
                                  c.get("linkedin_url",""), c.get("tier",""), c.get("relationship",""),
-                                 c.get("pipeline",""), c.get("owner","")])
-            st.download_button("⬇️ Export Results", conn_csv.getvalue().encode("utf-8"),
+                                 c.get("pipeline",""), c.get("owner",""), c.get("connected","")])
+            st.download_button("⬇️ Export CSV", conn_csv.getvalue().encode("utf-8"),
                                "n5h_connections.csv", "text/csv", use_container_width=True)
         st.divider()
 
-        # Tier badge helper
-        def tier_badge(tier):
-            t = (tier or "").upper()
-            if t == "WORLD-CLASS":
-                return '<span style="background:#16a34a22;color:#4ade80;font-size:0.65rem;font-weight:700;padding:2px 8px;border-radius:12px;border:1px solid #16a34a66;">WORLD-CLASS</span>'
-            elif t == "STRONG":
-                return '<span style="background:#2563eb22;color:#60a5fa;font-size:0.65rem;font-weight:700;padding:2px 8px;border-radius:12px;border:1px solid #2563eb66;">STRONG</span>'
-            elif t == "MAYBE":
-                return '<span style="background:#f59e0b22;color:#fbbf24;font-size:0.65rem;font-weight:700;padding:2px 8px;border-radius:12px;border:1px solid #f59e0b66;">MAYBE</span>'
-            return ""
-
-        def rel_badge(rel):
-            r = (rel or "").upper()
-            colors = {"WARM": "#f97316", "STRONG": "#22c55e", "COLD": "#9ca3af"}
-            c = colors.get(r, "#666")
-            if r:
-                return f' <span style="color:{c};font-size:0.65rem;font-weight:600;">● {r}</span>'
-            return ""
-
-        # Render connection cards
-        page_size = 50
+        # Render connection cards — SAME layout as render_candidate
+        pipeline = load_pipeline()
+        page_size = 100
         show_count = min(page_size, len(results))
         for idx, conn in enumerate(results[:show_count]):
+            conn_key = f"conn_{conn.get('name','').lower().replace(' ','_')}"
+            stage = pipeline.get(conn_key, {}).get("stage", "New")
+
             with st.container():
-                cc1, cc2, cc3 = st.columns([3, 2, 1])
-                with cc1:
-                    name_html = f"**{conn.get('name', 'Unknown')}**"
-                    badges = tier_badge(conn.get("tier")) + rel_badge(conn.get("relationship"))
+                col_badge, col_info, col_action = st.columns([1, 4, 2])
+
+                with col_badge:
+                    # Tier badge (replaces score badge)
+                    tier = (conn.get("tier") or "").upper()
+                    if tier == "WORLD-CLASS":
+                        st.markdown(
+                            '<div style="display:inline-block;background:#22c55e18;color:#22c55e;'
+                            'font-size:0.85rem;font-weight:800;padding:10px 14px;border-radius:12px;'
+                            'border:1px solid #22c55e40;box-shadow:0 0 16px rgba(34,197,94,0.2);'
+                            'text-align:center;min-width:72px;line-height:1.2;">'
+                            'WC<br><span style="font-size:0.5rem;font-weight:500;opacity:0.7;">WORLD-CLASS</span></div>',
+                            unsafe_allow_html=True)
+                    elif tier == "STRONG":
+                        st.markdown(
+                            '<div style="display:inline-block;background:#60a5fa18;color:#60a5fa;'
+                            'font-size:0.85rem;font-weight:800;padding:10px 14px;border-radius:12px;'
+                            'border:1px solid #60a5fa40;box-shadow:0 0 16px rgba(96,165,250,0.2);'
+                            'text-align:center;min-width:72px;line-height:1.2;">'
+                            'STR<br><span style="font-size:0.5rem;font-weight:500;opacity:0.7;">STRONG</span></div>',
+                            unsafe_allow_html=True)
+                    elif tier == "MAYBE":
+                        st.markdown(
+                            '<div style="display:inline-block;background:#f59e0b18;color:#fbbf24;'
+                            'font-size:0.85rem;font-weight:800;padding:10px 14px;border-radius:12px;'
+                            'border:1px solid #f59e0b40;box-shadow:0 0 16px rgba(245,158,11,0.2);'
+                            'text-align:center;min-width:72px;line-height:1.2;">'
+                            'MBE<br><span style="font-size:0.5rem;font-weight:500;opacity:0.7;">MAYBE</span></div>',
+                            unsafe_allow_html=True)
+                    else:
+                        st.markdown(
+                            '<div style="display:inline-block;background:#1e1e2e;color:#4b5563;'
+                            'font-size:0.75rem;font-weight:600;padding:8px 14px;border-radius:12px;'
+                            'border:1px solid #2a2a3e;text-align:center;min-width:72px;">—</div>',
+                            unsafe_allow_html=True)
+
+                    # Relationship badge
+                    rel = (conn.get("relationship") or "").upper()
+                    rel_colors = {"WARM": ("#f97316", "rgba(249,115,22,0.08)"),
+                                  "STRONG": ("#22c55e", "rgba(34,197,94,0.08)"),
+                                  "COLD": ("#9ca3af", "rgba(156,163,175,0.08)")}
+                    if rel in rel_colors:
+                        rc, rb = rel_colors[rel]
+                        st.markdown(
+                            f'<span style="background:{rb};color:{rc};font-size:0.65rem;font-weight:700;'
+                            f'padding:3px 9px;border-radius:20px;border:1px solid {rc}55;letter-spacing:0.06em;">'
+                            f'{rel}</span>', unsafe_allow_html=True)
+
+                    st.markdown(pipeline_badge(stage), unsafe_allow_html=True)
+
+                with col_info:
+                    name = conn.get("name", "Unknown")
+                    # Owner badge
+                    owner_badge = ""
+                    if conn.get("owner"):
+                        owner_badge = (
+                            f' <span style="background:rgba(255,255,255,0.06);color:#9ca3af;font-size:0.6rem;'
+                            f'font-weight:600;padding:2px 8px;border-radius:12px;border:1px solid rgba(255,255,255,0.1);'
+                            f'vertical-align:middle;">{conn["owner"]}</span>'
+                        )
+                    if conn.get("linkedin_url"):
+                        st.markdown(f"### [{name}]({conn['linkedin_url']}){owner_badge}", unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"### {name}{owner_badge}", unsafe_allow_html=True)
+
+                    if conn.get("title"):
+                        st.caption(conn["title"])
+
+                    # Metrics row
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Company", conn.get("company") or "—")
+                    m2.metric("Location", conn.get("location") or "—")
+                    m3.metric("Pipeline", conn.get("pipeline") or "—")
+                    m4.metric("Connected", conn.get("connected") or "—")
+
+                    # Contact info
+                    contact = []
+                    if conn.get("email"):
+                        contact.append(f"✉️ [{conn['email']}](mailto:{conn['email']})")
+                    if conn.get("phone"):
+                        contact.append(f"📞 {conn['phone']}")
+                    if conn.get("linkedin_url"):
+                        contact.append(f"🔗 [LinkedIn Profile]({conn['linkedin_url']})")
+                    if contact:
+                        st.markdown("  ·  ".join(contact))
+
+                    if conn.get("category"):
+                        st.markdown(f"**Category:** `{conn['category']}`")
+
+                with col_action:
+                    # Pipeline selector
+                    current_idx = PIPELINE_STAGES.index(stage) if stage in PIPELINE_STAGES else 0
+                    new_stage = st.selectbox("Pipeline", PIPELINE_STAGES, index=current_idx, key=f"cpipe_{idx}")
+                    if new_stage != stage:
+                        update_pipeline(conn_key, new_stage)
+                        st.rerun()
+
+                    # LinkedIn direct link
                     if conn.get("linkedin_url"):
                         st.markdown(
-                            f"### [{conn['name']}]({conn['linkedin_url']}){badges}",
-                            unsafe_allow_html=True,
-                        )
-                    else:
-                        st.markdown(f"### {conn['name']}{badges}", unsafe_allow_html=True)
+                            f'<a href="{conn["linkedin_url"]}" target="_blank" '
+                            f'style="display:block;text-align:center;padding:8px 12px;'
+                            f'background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);'
+                            f'border-radius:8px;color:#d0d0d0;text-decoration:none;font-size:0.85rem;'
+                            f'font-weight:600;margin-bottom:8px;">🔗 View LinkedIn</a>',
+                            unsafe_allow_html=True)
 
-                    meta_parts = []
-                    if conn.get("title"):    meta_parts.append(conn["title"])
-                    if conn.get("company"):  meta_parts.append(f"🏢 {conn['company']}")
-                    if conn.get("location"): meta_parts.append(f"📍 {conn['location']}")
-                    if meta_parts:
-                        st.caption("  ·  ".join(meta_parts))
+                    # Outreach
+                    if OPENAI_KEY_OK and conn.get("email"):
+                        if st.button("✉️ Generate Outreach", key=f"coutreach_{idx}"):
+                            with st.spinner("Writing..."):
+                                from openai import OpenAI
+                                client = OpenAI(api_key=OPENAI_API_KEY)
+                                prompt = (
+                                    f"Write a short, personalised outreach message to {conn.get('name')}.\n"
+                                    f"Their role: {conn.get('title', 'N/A')} at {conn.get('company', 'N/A')}.\n"
+                                    f"Location: {conn.get('location', 'N/A')}.\n"
+                                    f"Relationship: {conn.get('relationship', 'unknown')}.\n"
+                                    f"Keep it under 80 words, warm, genuine. Reference their work if possible.\n"
+                                    f"End with a soft call to action. No placeholders."
+                                )
+                                resp = client.chat.completions.create(
+                                    model="gpt-4o-mini",
+                                    messages=[{"role": "user", "content": prompt}],
+                                    max_tokens=200,
+                                )
+                                st.session_state[f"cmsg_{idx}"] = resp.choices[0].message.content
+                        if f"cmsg_{idx}" in st.session_state:
+                            st.code(st.session_state[f"cmsg_{idx}"], language=None)
 
-                with cc2:
-                    contact_parts = []
-                    if conn.get("email"):
-                        contact_parts.append(f"✉️ [{conn['email']}](mailto:{conn['email']})")
-                    if conn.get("phone"):
-                        contact_parts.append(f"📞 {conn['phone']}")
-                    if conn.get("linkedin_url"):
-                        contact_parts.append(f"🔗 [LinkedIn]({conn['linkedin_url']})")
-                    if contact_parts:
-                        st.markdown("  \n".join(contact_parts))
+                    # Notes
+                    existing_note = st.session_state["notes"].get(conn_key, "")
+                    new_note = st.text_area("📝 Notes", value=existing_note, height=70,
+                                            key=f"cnote_{idx}", placeholder="Private notes...")
+                    if st.button("💾 Save", key=f"csave_{idx}"):
+                        persist_note(conn_key, new_note)
+                        st.session_state["notes"][conn_key] = new_note
+                        st.toast("Note saved!", icon="📝")
 
-                    extra = []
-                    if conn.get("owner"):    extra.append(f"Owner: {conn['owner']}")
-                    if conn.get("pipeline"): extra.append(f"Pipeline: {conn['pipeline']}")
-                    if conn.get("connected"): extra.append(f"Connected: {conn['connected']}")
-                    if extra:
-                        st.caption("  ·  ".join(extra))
-
-                with cc3:
-                    conn_key = f"conn_{conn.get('name','').lower().replace(' ','_')}"
-                    pipeline_data_conn = load_pipeline()
-                    conn_stage = pipeline_data_conn.get(conn_key, {}).get("stage", "New")
-                    new_conn_stage = st.selectbox("Stage", PIPELINE_STAGES,
-                        index=PIPELINE_STAGES.index(conn_stage) if conn_stage in PIPELINE_STAGES else 0,
-                        key=f"cpipe_{idx}")
-                    if new_conn_stage != conn_stage:
-                        update_pipeline(conn_key, new_conn_stage)
-                        st.rerun()
             st.divider()
 
         if len(results) > show_count:
-            st.info(f"Showing first {show_count} of {len(results)} — use filters to narrow down.")
+            st.info(f"Showing first {show_count} of {len(results):,} — narrow your filters to see more.")
 
 # ── Results ───────────────────────────────────
 if "results" in st.session_state and st.session_state["results"]:

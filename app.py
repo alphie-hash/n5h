@@ -5,11 +5,53 @@ import csv
 import io
 import os
 import time
+import hashlib
+import base64
 from datetime import datetime
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from cryptography.fernet import Fernet
 from dotenv import load_dotenv
 load_dotenv()
+
+# ─────────────────────────────────────────────
+# Encryption helpers — encrypt/decrypt data files at rest
+# ─────────────────────────────────────────────
+def _get_encryption_key():
+    """Derive a Fernet key from APP_PASSWORD (or a dedicated ENCRYPTION_KEY env var)."""
+    secret = os.getenv("ENCRYPTION_KEY") or os.getenv("APP_PASSWORD", "alphieisdaddy")
+    # Derive a 32-byte key using SHA-256, then base64 encode for Fernet
+    key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
+    return key
+
+_fernet = Fernet(_get_encryption_key())
+
+def _read_json_encrypted(filepath):
+    """Read a JSON file, decrypting if encrypted, falling back to plaintext."""
+    if not os.path.exists(filepath):
+        return None
+    with open(filepath, "rb") as f:
+        raw = f.read()
+    if not raw:
+        return None
+    # Try to decrypt first (encrypted files start with 'gAAAAA')
+    try:
+        decrypted = _fernet.decrypt(raw)
+        return json.loads(decrypted.decode("utf-8"))
+    except Exception:
+        pass
+    # Fall back to plaintext JSON (for migration of existing unencrypted files)
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+
+def _write_json_encrypted(filepath, data):
+    """Write a JSON file encrypted at rest."""
+    plaintext = json.dumps(data, indent=2).encode("utf-8")
+    encrypted = _fernet.encrypt(plaintext)
+    with open(filepath, "wb") as f:
+        f.write(encrypted)
 
 # ─────────────────────────────────────────────
 # Paths & Constants
@@ -58,10 +100,7 @@ SENIORITY_MAP = {
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=30, show_spinner=False)
 def _load_notes_cached(mtime):
-    if os.path.exists(NOTES_FILE):
-        with open(NOTES_FILE) as f:
-            return json.load(f)
-    return {}
+    return _read_json_encrypted(NOTES_FILE) or {}
 
 def load_notes():
     mtime = os.path.getmtime(NOTES_FILE) if os.path.exists(NOTES_FILE) else 0
@@ -73,17 +112,13 @@ def persist_note(username, text):
         notes[username] = text.strip()
     elif username in notes:
         del notes[username]
-    with open(NOTES_FILE, "w") as f:
-        json.dump(notes, f, indent=2)
+    _write_json_encrypted(NOTES_FILE, notes)
 
 # ─────────────────────────────────────────────
 # Saved Searches
 # ─────────────────────────────────────────────
 def load_saved_searches():
-    if os.path.exists(SAVES_FILE):
-        with open(SAVES_FILE) as f:
-            return json.load(f)
-    return []
+    return _read_json_encrypted(SAVES_FILE) or []
 
 def persist_search(label, candidates):
     saves = load_saved_searches()
@@ -95,24 +130,16 @@ def persist_search(label, candidates):
         "candidates": candidates,
     })
     saves = saves[:10]
-    with open(SAVES_FILE, "w") as f:
-        json.dump(saves, f, indent=2)
+    _write_json_encrypted(SAVES_FILE, saves)
 
 # ─────────────────────────────────────────────
 # Profile Cache
 # ─────────────────────────────────────────────
 def _load_cache():
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE) as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
+    return _read_json_encrypted(CACHE_FILE) or {}
 
 def _save_cache(cache):
-    with open(CACHE_FILE, "w") as f:
-        json.dump(cache, f)
+    _write_json_encrypted(CACHE_FILE, cache)
 
 def get_user_profile_cached(username):
     cache = _load_cache()
@@ -134,11 +161,7 @@ def get_user_profile_cached(username):
 def _migrate_legacy_pipeline():
     """One-time migration: pipeline.json → projects.json."""
     if os.path.exists(PIPELINE_FILE) and not os.path.exists(PROJECTS_FILE):
-        try:
-            with open(PIPELINE_FILE) as f:
-                old_data = json.load(f)
-        except Exception:
-            old_data = {}
+        old_data = _read_json_encrypted(PIPELINE_FILE) or {}
         data = {
             "_version": 2,
             "_active": "Default",
@@ -146,22 +169,14 @@ def _migrate_legacy_pipeline():
                 "Default": {"created": time.strftime("%d %b %Y"), "candidates": old_data}
             }
         }
-        with open(PROJECTS_FILE, "w") as f:
-            json.dump(data, f, indent=2)
+        _write_json_encrypted(PROJECTS_FILE, data)
 
 @st.cache_data(ttl=10, show_spinner=False)
 def _load_projects_cached(mtime):
-    if os.path.exists(PROJECTS_FILE):
-        try:
-            with open(PROJECTS_FILE) as f:
-                return json.load(f)
-        except Exception:
-            return None
-    return None
+    return _read_json_encrypted(PROJECTS_FILE)
 
 def _save_projects(data):
-    with open(PROJECTS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    _write_json_encrypted(PROJECTS_FILE, data)
 
 def load_projects():
     _migrate_legacy_pipeline()
@@ -293,14 +308,9 @@ def _parse_csv_rows(reader):
 @st.cache_data(ttl=300, show_spinner=False)
 def _load_connections_cached(cache_mtime):
     """Load connections from disk. cache_mtime param busts the cache when file changes."""
-    if os.path.exists(CONTACTS_FILE):
-        try:
-            with open(CONTACTS_FILE) as f:
-                data = json.load(f)
-                if data:
-                    return data
-        except Exception:
-            pass
+    data = _read_json_encrypted(CONTACTS_FILE)
+    if data:
+        return data
     # Auto-import from bundled CSVs on first run
     all_conns = []
     for csv_path in CONNECTION_CSVS:
@@ -326,8 +336,7 @@ def _dedupe_connections(connections):
     return unique
 
 def save_connections(connections):
-    with open(CONTACTS_FILE, "w") as f:
-        json.dump(connections, f, indent=2)
+    _write_json_encrypted(CONTACTS_FILE, connections)
 
 # Location aliases — common abbreviations map to full names for fuzzy matching
 LOCATION_ALIASES = {
@@ -949,22 +958,50 @@ def render_candidate(c, idx, role_query, pipeline, connections=None):
 st.set_page_config(page_title="N5H", page_icon="🔍", layout="wide")
 st.markdown(PREMIUM_CSS, unsafe_allow_html=True)
 
-# ── Password Gate ─────────────────────────────
+# ── Password Gate with Rate Limiting ──────────
 APP_PASSWORD = os.getenv("APP_PASSWORD", "alphieisdaddy")
+MAX_LOGIN_ATTEMPTS = 5
+LOCKOUT_SECONDS = 300  # 5-minute lockout after max attempts
 
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
+if "login_attempts" not in st.session_state:
+    st.session_state["login_attempts"] = 0
+if "lockout_until" not in st.session_state:
+    st.session_state["lockout_until"] = 0
 
 if not st.session_state["authenticated"]:
     st.title("🔒 N5H")
     st.caption("Enter password to continue")
+
+    # Check lockout
+    now = time.time()
+    if st.session_state["lockout_until"] > now:
+        remaining = int(st.session_state["lockout_until"] - now)
+        mins, secs = divmod(remaining, 60)
+        st.error(f"🚫 Too many failed attempts. Locked out for **{mins}m {secs}s**.")
+        st.caption("Refresh the page to try again after the lockout expires.")
+        st.stop()
+
     pwd = st.text_input("Password", type="password", placeholder="Enter password…")
+    attempts_left = MAX_LOGIN_ATTEMPTS - st.session_state["login_attempts"]
+    if st.session_state["login_attempts"] > 0:
+        st.caption(f"⚠️ {attempts_left} attempt{'s' if attempts_left != 1 else ''} remaining")
+
     if st.button("Login", type="primary", use_container_width=True):
         if pwd == APP_PASSWORD:
             st.session_state["authenticated"] = True
+            st.session_state["login_attempts"] = 0
+            st.session_state["lockout_until"] = 0
             st.rerun()
         else:
-            st.error("Wrong password")
+            st.session_state["login_attempts"] += 1
+            if st.session_state["login_attempts"] >= MAX_LOGIN_ATTEMPTS:
+                st.session_state["lockout_until"] = time.time() + LOCKOUT_SECONDS
+                st.error(f"🚫 Account locked for {LOCKOUT_SECONDS // 60} minutes after {MAX_LOGIN_ATTEMPTS} failed attempts.")
+            else:
+                st.error("Wrong password")
+            st.rerun()
     st.stop()
 
 # ── Authenticated ─────────────────────────────

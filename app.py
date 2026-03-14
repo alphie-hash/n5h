@@ -615,9 +615,37 @@ def fmt_age(profile):
     return f"{days // 30}mo" if days >= 30 else f"{days}d"
 
 # ─────────────────────────────────────────────
+# JD → Search Keywords Extractor
+# ─────────────────────────────────────────────
+def extract_search_keywords(job_description):
+    """Use AI to extract GitHub-searchable keywords from a job description."""
+    from openai import OpenAI
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    prompt = f"""Extract the most important GitHub-searchable keywords from this job description.
+Return ONLY a short search query (3-6 words max) that would find matching developers on GitHub.
+Focus on: job title, key technical skills, programming languages.
+Do NOT include soft skills, company info, or benefits.
+
+Job Description:
+{job_description.strip()}
+
+Reply with ONLY the search query, nothing else. Example: "machine learning python pytorch"
+"""
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=50,
+            temperature=0.1,
+        )
+        return resp.choices[0].message.content.strip().strip('"').strip("'")
+    except Exception:
+        return ""
+
+# ─────────────────────────────────────────────
 # Batch AI Scorer
 # ─────────────────────────────────────────────
-def score_candidates_batch(candidates, role):
+def score_candidates_batch(candidates, role, job_description=""):
     from openai import OpenAI
     client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -636,9 +664,24 @@ def score_candidates_batch(candidates, role):
             f"repos:{repos} | pubRepos:{p.get('public_repos', 0)} | followers:{p.get('followers', 0)}"
         )
 
+    # Build scoring prompt — use full JD if provided
+    if job_description and job_description.strip():
+        jd_block = (
+            f"ROLE: {role}\n\n"
+            f"FULL JOB DESCRIPTION / 1-PAGER:\n{job_description.strip()}\n\n"
+            "Score each developer 0.0-10.0 based on how well they match the job description above.\n"
+            "Criteria: required skills match, experience level, repo relevance, language fit, "
+            "domain expertise alignment with the JD.\n"
+            "Weight heavily: specific technical skills mentioned in the JD, relevant project experience, seniority signals.\n\n"
+        )
+    else:
+        jd_block = (
+            f"Score each developer 0.0-10.0 for fit as: {role}\n"
+            "Criteria: language match, repo relevance, seniority signals, bio alignment.\n\n"
+        )
+
     prompt = (
-        f"Score each developer 0.0-10.0 for fit as: {role}\n"
-        "Criteria: language match, repo relevance, seniority signals, bio alignment.\n\n"
+        jd_block
         + "\n".join(lines)
         + '\n\nReply ONLY with a JSON array in the same order:\n[{"i":0,"score":7.5,"reason":"one sentence max 12 words"},...]'
     )
@@ -662,7 +705,7 @@ def score_candidates_batch(candidates, role):
 # ─────────────────────────────────────────────
 # Outreach Generator
 # ─────────────────────────────────────────────
-def generate_outreach(profile, role, repos):
+def generate_outreach(profile, role, repos, job_description=""):
     from openai import OpenAI
     client    = OpenAI(api_key=OPENAI_API_KEY)
     name      = profile.get("name") or profile.get("login")
@@ -690,7 +733,10 @@ CANDIDATE PROFILE:
 {repo_str}
 
 ROLE WE ARE SOURCING FOR: {role}
-
+"""
+    if job_description and job_description.strip():
+        prompt += f"\nFULL JOB DESCRIPTION:\n{job_description.strip()}\n"
+    prompt += """
 OUTREACH FORMULA (follow this structure exactly):
 
 1. SUBJECT LINE: Short, specific to their work — not generic.
@@ -937,7 +983,8 @@ def render_candidate(c, idx, role_query, pipeline, connections=None):
             # Outreach — st.code gives a built-in copy button
             if st.button("✉️ Generate Outreach", key=f"outreach_{username}_{idx}"):
                 with st.spinner("Writing…"):
-                    st.session_state[f"msg_{username}"] = generate_outreach(profile, role_query, user_repos)
+                    jd_for_outreach = job_description if 'job_description' in dir() else ""
+                    st.session_state[f"msg_{username}"] = generate_outreach(profile, role_query, user_repos, jd_for_outreach)
             if f"msg_{username}" in st.session_state:
                 st.code(st.session_state[f"msg_{username}"], language=None)
 
@@ -1181,6 +1228,16 @@ if search_mode == "👤 User Search":
         min_followers_val = st.number_input("Min followers", min_value=0, value=0, step=50)
     sel_languages = []
 
+    # Job description for AI scoring
+    with st.expander("📋 Paste Job Description / 1-Pager (optional — improves AI scoring)", expanded=False):
+        job_description = st.text_area(
+            "Job Description",
+            height=250,
+            placeholder="Paste the full job description, 1-pager, or role requirements here.\n\nThe AI will score candidates against this instead of just keywords.",
+            key="jd_user_search",
+            label_visibility="collapsed",
+        )
+
     def build_user_query(include_location=True):
         """Build GitHub search query — location IN query for best results."""
         parts = []
@@ -1222,9 +1279,18 @@ if search_mode == "👤 User Search":
         if not GITHUB_TOKEN_OK or not OPENAI_KEY_OK:
             st.error("Missing API keys — add them to `~/n5h/.env`")
             st.stop()
+
+        # If no role keywords but JD is provided, extract keywords from JD
+        if not role_query.strip() and job_description.strip():
+            with st.spinner("🤖 Extracting search keywords from job description…"):
+                extracted = extract_search_keywords(job_description)
+            if extracted:
+                role_query = extracted
+                st.info(f"🔍 Searching for: **{extracted}** (extracted from JD)")
+
         final_query = build_user_query()
         if final_query.strip() == "type:user":
-            st.warning("Add at least one filter to search.")
+            st.warning("Add at least one filter or paste a job description.")
             st.stop()
 
         # Location is in the GitHub query — no need to over-fetch
@@ -1332,8 +1398,9 @@ if search_mode == "👤 User Search":
             st.stop()
 
         score_label = role_query or ", ".join(sel_languages) or "the role"
+        jd_text = job_description if 'job_description' in dir() else ""
         st.markdown(f"### Scoring {len(candidates)} candidates in one batch…")
-        scores, score_err = score_candidates_batch(candidates, score_label)
+        scores, score_err = score_candidates_batch(candidates, score_label, jd_text)
         if score_err == "quota":
             st.warning("⚠️ OpenAI quota exceeded — candidates shown unscored.")
         elif score_err:
@@ -1359,11 +1426,27 @@ elif search_mode == "📁 Repo Search":
     with col2:
         max_candidates = st.selectbox("Candidates", [30, 60, 100], index=0)
 
+    with st.expander("📋 Paste Job Description / 1-Pager (optional — improves AI scoring)", expanded=False):
+        job_description = st.text_area(
+            "Job Description",
+            height=250,
+            placeholder="Paste the full job description, 1-pager, or role requirements here.",
+            key="jd_repo_search",
+            label_visibility="collapsed",
+        )
+
     search_clicked = st.button("🔍 Find Candidates", type="primary", use_container_width=True)
 
     if search_clicked:
+        # Extract keywords from JD if no role query
+        if not role_query.strip() and job_description.strip():
+            with st.spinner("🤖 Extracting search keywords from job description…"):
+                extracted = extract_search_keywords(job_description)
+            if extracted:
+                role_query = extracted
+                st.info(f"🔍 Searching for: **{extracted}** (extracted from JD)")
         if not role_query:
-            st.warning("Please enter a role description first.")
+            st.warning("Please enter a role description or paste a job description.")
             st.stop()
         if not GITHUB_TOKEN_OK or not OPENAI_KEY_OK:
             st.error("Missing API keys — add them to `~/n5h/.env`")
@@ -1426,8 +1509,9 @@ elif search_mode == "📁 Repo Search":
             time.sleep(0.15)
         fetch_prog.empty()
 
+        jd_text = job_description if 'job_description' in dir() else ""
         st.markdown(f"### Scoring {len(candidates)} candidates in one batch…")
-        scores, score_err = score_candidates_batch(candidates, role_query)
+        scores, score_err = score_candidates_batch(candidates, role_query, jd_text)
         if score_err == "quota":
             st.warning("⚠️ OpenAI quota exceeded — candidates shown unscored.")
         elif score_err:

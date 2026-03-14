@@ -54,11 +54,16 @@ SENIORITY_MAP = {
 # ─────────────────────────────────────────────
 # Notes
 # ─────────────────────────────────────────────
-def load_notes():
+@st.cache_data(ttl=30, show_spinner=False)
+def _load_notes_cached(mtime):
     if os.path.exists(NOTES_FILE):
         with open(NOTES_FILE) as f:
             return json.load(f)
     return {}
+
+def load_notes():
+    mtime = os.path.getmtime(NOTES_FILE) if os.path.exists(NOTES_FILE) else 0
+    return _load_notes_cached(mtime)
 
 def persist_note(username, text):
     notes = load_notes()
@@ -124,7 +129,8 @@ def get_user_profile_cached(username):
 # ─────────────────────────────────────────────
 # Pipeline CRM
 # ─────────────────────────────────────────────
-def load_pipeline():
+@st.cache_data(ttl=10, show_spinner=False)
+def _load_pipeline_cached(mtime):
     if os.path.exists(PIPELINE_FILE):
         try:
             with open(PIPELINE_FILE) as f:
@@ -132,6 +138,10 @@ def load_pipeline():
         except Exception:
             return {}
     return {}
+
+def load_pipeline():
+    mtime = os.path.getmtime(PIPELINE_FILE) if os.path.exists(PIPELINE_FILE) else 0
+    return _load_pipeline_cached(mtime)
 
 def update_pipeline(username, stage):
     pipeline = load_pipeline()
@@ -200,8 +210,9 @@ def _parse_csv_rows(reader):
         })
     return connections
 
-def load_connections():
-    # Try cached JSON first
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_connections_cached(cache_mtime):
+    """Load connections from disk. cache_mtime param busts the cache when file changes."""
     if os.path.exists(CONTACTS_FILE):
         try:
             with open(CONTACTS_FILE) as f:
@@ -219,6 +230,10 @@ def load_connections():
         all_conns = _dedupe_connections(all_conns)
         save_connections(all_conns)
     return all_conns
+
+def load_connections():
+    mtime = os.path.getmtime(CONTACTS_FILE) if os.path.exists(CONTACTS_FILE) else 0
+    return _load_connections_cached(mtime)
 
 def _dedupe_connections(connections):
     seen = set()
@@ -369,16 +384,31 @@ PREMIUM_CSS = """
 # GitHub API
 # ─────────────────────────────────────────────
 def search_users_direct(query, max_results=30):
+    """Fetch up to max_results users, paginating through GitHub Search API."""
     url = "https://api.github.com/search/users"
-    params = {"q": query, "sort": "followers", "order": "desc", "per_page": min(max_results, 30)}
-    r = requests.get(url, headers=HEADERS, params=params)
-    if r.status_code == 200:
-        return r.json().get("items", []), None
-    try:
-        msg = r.json().get("message", r.text)
-    except Exception:
-        msg = r.text
-    return [], f"GitHub API error {r.status_code}: {msg}"
+    all_items = []
+    per_page = min(max_results, 100)  # GitHub allows up to 100 per page
+    pages_needed = (max_results + per_page - 1) // per_page  # ceil division
+    for page in range(1, pages_needed + 1):
+        params = {"q": query, "sort": "followers", "order": "desc",
+                  "per_page": per_page, "page": page}
+        r = requests.get(url, headers=HEADERS, params=params)
+        if r.status_code != 200:
+            try:
+                msg = r.json().get("message", r.text)
+            except Exception:
+                msg = r.text
+            if all_items:          # partial success — return what we have
+                break
+            return [], f"GitHub API error {r.status_code}: {msg}"
+        items = r.json().get("items", [])
+        all_items.extend(items)
+        if len(items) < per_page:  # no more pages
+            break
+        if len(all_items) >= max_results:
+            break
+        time.sleep(0.15)           # rate-limit courtesy
+    return all_items[:max_results], None
 
 def search_repos(query, max_repos=5):
     url = "https://api.github.com/search/repositories"
@@ -838,7 +868,7 @@ if search_mode == "👤 User Search":
     with r1a:
         role_query = st.text_input("Role / Keywords", placeholder='e.g. "machine learning" OR "full stack" OR "react"')
     with r1b:
-        max_candidates = st.selectbox("Candidates", [10, 20, 30], index=0)
+        max_candidates = st.selectbox("Candidates", [30, 60, 100, 150], index=0)
 
     r2a, r2b, r2c, r2d = st.columns([2, 2, 1, 1])
     with r2a:
@@ -884,8 +914,13 @@ if search_mode == "👤 User Search":
             st.warning("Add at least one filter to search.")
             st.stop()
 
+        # When company filter is set, fetch a bigger pool to post-filter from
+        fetch_pool = max_candidates
+        if company_query.strip():
+            fetch_pool = min(max_candidates * 5, 300)  # 5x over-fetch for company filtering
+
         with st.spinner("Searching GitHub users…"):
-            users, api_err = search_users_direct(final_query, max_candidates)
+            users, api_err = search_users_direct(final_query, fetch_pool)
         if api_err:
             st.error(api_err)
             st.stop()
@@ -917,17 +952,20 @@ if search_mode == "👤 User Search":
             # Track company matches separately (soft filter)
             if company_query.strip():
                 company = (profile.get("company") or "").lower().strip("@ ")
-                if company_query.lower().strip() in company:
+                bio = (profile.get("bio") or "").lower()
+                if company_query.lower().strip() in company or company_query.lower().strip() in bio:
                     company_matches.append(entry)
             prog.progress((i + 1) / len(users))
-            time.sleep(0.1)
+            time.sleep(0.05)
         prog.empty()
 
         # If company filter was set and got matches, use those; otherwise show all
         if company_query.strip() and company_matches:
-            candidates = company_matches
+            candidates = company_matches[:max_candidates]
+            st.info(f"Found {len(company_matches)} profiles matching \"{company_query}\" (from {len(candidates)+len(company_matches)-len(candidates)} scanned).")
         elif company_query.strip() and not company_matches:
-            st.info(f"ℹ️ No exact \"{company_query}\" matches — showing all {len(candidates)} candidates.")
+            candidates = candidates[:max_candidates]
+            st.info(f"ℹ️ No exact \"{company_query}\" matches in {len(candidates)} profiles — showing all.")
 
         if not candidates:
             st.warning("No candidates after filtering. Try broader search.")
@@ -948,6 +986,7 @@ if search_mode == "👤 User Search":
         candidates.sort(key=lambda x: (x["score"] is not None, x["score"] or 0), reverse=True)
         st.session_state["results"]     = candidates
         st.session_state["loaded_role"] = score_label
+        st.session_state["res_page"]    = 0
 
 # ── Repo Search ───────────────────────────────
 elif search_mode == "📁 Repo Search":
@@ -958,7 +997,7 @@ elif search_mode == "📁 Repo Search":
             placeholder="e.g. Senior ML Engineer specialising in PyTorch and CUDA",
         )
     with col2:
-        max_candidates = st.selectbox("Candidates", [10, 20, 30], index=0)
+        max_candidates = st.selectbox("Candidates", [30, 60, 100], index=0)
 
     search_clicked = st.button("🔍 Find Candidates", type="primary", use_container_width=True)
 
@@ -1041,6 +1080,7 @@ elif search_mode == "📁 Repo Search":
         candidates.sort(key=lambda x: (x["score"] is not None, x["score"] or 0), reverse=True)
         st.session_state["results"]     = candidates
         st.session_state["loaded_role"] = role_query
+        st.session_state["res_page"]    = 0
 
 # ── My Network Search ─────────────────────────
 elif search_mode == "📇 My Network":
@@ -1113,9 +1153,40 @@ elif search_mode == "📇 My Network":
 
         # Render connection cards — SAME layout as render_candidate
         pipeline = load_pipeline()
-        page_size = 300
-        show_count = min(page_size, len(results))
-        for idx, conn in enumerate(results[:show_count]):
+        page_size = 50
+        total_pages = max(1, (len(results) + page_size - 1) // page_size)
+        if "net_page" not in st.session_state:
+            st.session_state["net_page"] = 0
+        # Clamp page
+        st.session_state["net_page"] = min(st.session_state["net_page"], total_pages - 1)
+        current_page = st.session_state["net_page"]
+        start_idx = current_page * page_size
+        end_idx = min(start_idx + page_size, len(results))
+
+        if total_pages > 1:
+            pg1, pg2, pg3, pg4, pg5 = st.columns([1, 1, 2, 1, 1])
+            with pg1:
+                if st.button("⏮ First", disabled=current_page == 0, key="net_first", use_container_width=True):
+                    st.session_state["net_page"] = 0
+                    st.rerun()
+            with pg2:
+                if st.button("◀ Prev", disabled=current_page == 0, key="net_prev", use_container_width=True):
+                    st.session_state["net_page"] -= 1
+                    st.rerun()
+            with pg3:
+                st.markdown(f"<div style='text-align:center;padding:8px;color:#aaa;font-size:0.9rem;'>"
+                           f"Page {current_page + 1} of {total_pages} · Showing {start_idx + 1}–{end_idx} of {len(results):,}</div>",
+                           unsafe_allow_html=True)
+            with pg4:
+                if st.button("Next ▶", disabled=current_page >= total_pages - 1, key="net_next", use_container_width=True):
+                    st.session_state["net_page"] += 1
+                    st.rerun()
+            with pg5:
+                if st.button("Last ⏭", disabled=current_page >= total_pages - 1, key="net_last", use_container_width=True):
+                    st.session_state["net_page"] = total_pages - 1
+                    st.rerun()
+
+        for idx, conn in enumerate(results[start_idx:end_idx], start=start_idx):
             conn_key = f"conn_{conn.get('name','').lower().replace(' ','_')}"
             stage = pipeline.get(conn_key, {}).get("stage", "New")
 
@@ -1261,8 +1332,20 @@ elif search_mode == "📇 My Network":
 
             st.divider()
 
-        if len(results) > show_count:
-            st.info(f"Showing first {show_count} of {len(results):,} — narrow your filters to see more.")
+        # Bottom pagination
+        if total_pages > 1:
+            bpg1, bpg2, bpg3 = st.columns([1, 2, 1])
+            with bpg1:
+                if st.button("◀ Previous", disabled=current_page == 0, key="net_prev_b", use_container_width=True):
+                    st.session_state["net_page"] -= 1
+                    st.rerun()
+            with bpg2:
+                st.markdown(f"<div style='text-align:center;padding:8px;color:#666;font-size:0.85rem;'>"
+                           f"Page {current_page + 1} / {total_pages}</div>", unsafe_allow_html=True)
+            with bpg3:
+                if st.button("Next ▶", disabled=current_page >= total_pages - 1, key="net_next_b", use_container_width=True):
+                    st.session_state["net_page"] += 1
+                    st.rerun()
 
 # ── Results ───────────────────────────────────
 if "results" in st.session_state and st.session_state["results"]:
@@ -1315,5 +1398,44 @@ if "results" in st.session_state and st.session_state["results"]:
         st.warning("No candidates match the current filters.")
     else:
         all_connections = load_connections()
-        for idx, c in enumerate(display):
+        # Paginate results — 25 per page
+        res_page_size = 25
+        res_total_pages = max(1, (len(display) + res_page_size - 1) // res_page_size)
+        if "res_page" not in st.session_state:
+            st.session_state["res_page"] = 0
+        st.session_state["res_page"] = min(st.session_state["res_page"], res_total_pages - 1)
+        res_current = st.session_state["res_page"]
+        res_start = res_current * res_page_size
+        res_end = min(res_start + res_page_size, len(display))
+
+        if res_total_pages > 1:
+            rp1, rp2, rp3 = st.columns([1, 2, 1])
+            with rp1:
+                if st.button("◀ Prev", disabled=res_current == 0, key="res_prev", use_container_width=True):
+                    st.session_state["res_page"] -= 1
+                    st.rerun()
+            with rp2:
+                st.markdown(f"<div style='text-align:center;padding:8px;color:#aaa;font-size:0.9rem;'>"
+                           f"Page {res_current + 1} of {res_total_pages} · Showing {res_start + 1}–{res_end} of {len(display)}</div>",
+                           unsafe_allow_html=True)
+            with rp3:
+                if st.button("Next ▶", disabled=res_current >= res_total_pages - 1, key="res_next", use_container_width=True):
+                    st.session_state["res_page"] += 1
+                    st.rerun()
+
+        for idx, c in enumerate(display[res_start:res_end], start=res_start):
             render_candidate(c, idx, role_query_active, pipeline, all_connections)
+
+        if res_total_pages > 1:
+            brp1, brp2, brp3 = st.columns([1, 2, 1])
+            with brp1:
+                if st.button("◀ Previous", disabled=res_current == 0, key="res_prev_b", use_container_width=True):
+                    st.session_state["res_page"] -= 1
+                    st.rerun()
+            with brp2:
+                st.markdown(f"<div style='text-align:center;padding:8px;color:#666;font-size:0.85rem;'>"
+                           f"Page {res_current + 1} / {res_total_pages}</div>", unsafe_allow_html=True)
+            with brp3:
+                if st.button("Next ▶", disabled=res_current >= res_total_pages - 1, key="res_next_b", use_container_width=True):
+                    st.session_state["res_page"] += 1
+                    st.rerun()

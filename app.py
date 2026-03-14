@@ -912,9 +912,21 @@ if search_mode == "👤 User Search":
         # Direct substring match
         if q_lower in prof_lower:
             return True
-        # Check aliases
-        aliases = LOCATION_ALIASES.get(q_lower, [q_lower])
-        return any(alias in prof_lower for alias in aliases)
+        # Normalized match: strip spaces/punctuation (catches "sanfrancisco" → "San Francisco")
+        prof_norm = prof_lower.replace(" ", "").replace(",", "").replace("-", "").replace(".", "")
+        q_norm = q_lower.replace(" ", "").replace(",", "").replace("-", "").replace(".", "")
+        if q_norm in prof_norm:
+            return True
+        # Check aliases — try exact key, then normalized key
+        aliases = LOCATION_ALIASES.get(q_lower, [])
+        if not aliases:
+            for key, vals in LOCATION_ALIASES.items():
+                if key.replace(" ", "") == q_norm:
+                    aliases = vals
+                    break
+        if aliases:
+            return any(alias in prof_lower for alias in aliases)
+        return False
 
     def build_user_query():
         """Build GitHub search query — location & company are POST-filters, not in query."""

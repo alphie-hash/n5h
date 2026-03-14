@@ -1113,7 +1113,7 @@ elif search_mode == "📇 My Network":
 
         # Render connection cards — SAME layout as render_candidate
         pipeline = load_pipeline()
-        page_size = 100
+        page_size = 300
         show_count = min(page_size, len(results))
         for idx, conn in enumerate(results[:show_count]):
             conn_key = f"conn_{conn.get('name','').lower().replace(' ','_')}"

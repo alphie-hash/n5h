@@ -190,16 +190,26 @@ def load_pipeline():
     """Backward-compat wrapper — returns active project's pipeline."""
     return get_active_pipeline(load_projects())
 
-def update_pipeline(username, stage):
-    """Update candidate stage within active project."""
+def update_pipeline(username, stage, project_name=None):
+    """Update candidate stage within a specific project (or active project)."""
     data = load_projects()
-    active = get_active_project_name(data)
-    project = data["projects"].setdefault(active, {"created": time.strftime("%d %b %Y"), "candidates": {}})
+    target = project_name or get_active_project_name(data)
+    project = data["projects"].setdefault(target, {"created": time.strftime("%d %b %Y"), "candidates": {}})
     if stage == "New":
         project["candidates"].pop(username, None)
     else:
         project["candidates"][username] = {"stage": stage, "updated": time.strftime("%d %b %Y")}
     _save_projects(data)
+
+def get_candidate_projects(username):
+    """Return list of (project_name, stage) for a candidate across all projects."""
+    data = load_projects()
+    result = []
+    for pname, pdata in data.get("projects", {}).items():
+        cand = pdata.get("candidates", {}).get(username)
+        if cand:
+            result.append((pname, cand.get("stage", "New")))
+    return result
 
 def create_project(name):
     data = load_projects()
@@ -866,12 +876,33 @@ def render_candidate(c, idx, role_query, pipeline, connections=None):
                 st.markdown(f"**Top repos:** {repo_links}")
 
         with col_action:
-            # Pipeline selector
+            # Project + Pipeline selector
+            proj_data = load_projects()
+            proj_names = list(proj_data.get("projects", {}).keys())
+            active_proj = get_active_project_name(proj_data)
+
+            # Show which projects this candidate is already in
+            in_projects = get_candidate_projects(username)
+            if in_projects:
+                tags = "  ".join([f"`{pn}: {ps}`" for pn, ps in in_projects])
+                st.markdown(f"📁 {tags}", help="Projects this candidate is in")
+
+            # Stage selector for active project
             current_idx = PIPELINE_STAGES.index(stage) if stage in PIPELINE_STAGES else 0
             new_stage   = st.selectbox("Pipeline", PIPELINE_STAGES, index=current_idx, key=f"pipe_{username}_{idx}")
             if new_stage != stage:
                 update_pipeline(username, new_stage)
                 st.rerun()
+
+            # Add to another project
+            other_projects = [p for p in proj_names if p != active_proj]
+            if other_projects:
+                add_proj = st.selectbox("➕ Add to project", ["—"] + other_projects, key=f"addproj_{username}_{idx}")
+                if add_proj != "—":
+                    add_stage = st.selectbox("Stage", PIPELINE_STAGES[1:], key=f"addstage_{username}_{idx}")
+                    if st.button("Add ✓", key=f"addbtn_{username}_{idx}", use_container_width=True):
+                        update_pipeline(username, add_stage, project_name=add_proj)
+                        st.rerun()
 
             # LinkedIn — direct link if in network, otherwise search
             li_url_direct = conn_match.get("linkedin_url") if conn_match else None
@@ -1558,12 +1589,30 @@ elif search_mode == "📇 My Network":
                         st.markdown(f"**Category:** `{conn['category']}`")
 
                 with col_action:
-                    # Pipeline selector
+                    # Project + Pipeline selector
+                    proj_data = load_projects()
+                    proj_names = list(proj_data.get("projects", {}).keys())
+                    active_proj = get_active_project_name(proj_data)
+
+                    in_projects = get_candidate_projects(conn_key)
+                    if in_projects:
+                        tags = "  ".join([f"`{pn}: {ps}`" for pn, ps in in_projects])
+                        st.markdown(f"📁 {tags}", help="Projects this candidate is in")
+
                     current_idx = PIPELINE_STAGES.index(stage) if stage in PIPELINE_STAGES else 0
                     new_stage = st.selectbox("Pipeline", PIPELINE_STAGES, index=current_idx, key=f"cpipe_{idx}")
                     if new_stage != stage:
                         update_pipeline(conn_key, new_stage)
                         st.rerun()
+
+                    other_projects = [p for p in proj_names if p != active_proj]
+                    if other_projects:
+                        add_proj = st.selectbox("➕ Add to project", ["—"] + other_projects, key=f"caddproj_{idx}")
+                        if add_proj != "—":
+                            add_stage = st.selectbox("Stage", PIPELINE_STAGES[1:], key=f"caddstage_{idx}")
+                            if st.button("Add ✓", key=f"caddbtn_{idx}", use_container_width=True):
+                                update_pipeline(conn_key, add_stage, project_name=add_proj)
+                                st.rerun()
 
                     # LinkedIn direct link
                     if conn.get("linkedin_url"):

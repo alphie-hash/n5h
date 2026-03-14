@@ -948,6 +948,26 @@ def render_candidate(c, idx, role_query, pipeline, connections=None):
 # ─────────────────────────────────────────────
 st.set_page_config(page_title="N5H", page_icon="🔍", layout="wide")
 st.markdown(PREMIUM_CSS, unsafe_allow_html=True)
+
+# ── Password Gate ─────────────────────────────
+APP_PASSWORD = os.getenv("APP_PASSWORD", "alphieisdaddy")
+
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+if not st.session_state["authenticated"]:
+    st.title("🔒 N5H")
+    st.caption("Enter password to continue")
+    pwd = st.text_input("Password", type="password", placeholder="Enter password…")
+    if st.button("Login", type="primary", use_container_width=True):
+        if pwd == APP_PASSWORD:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Wrong password")
+    st.stop()
+
+# ── Authenticated ─────────────────────────────
 st.title("🔍 N5H")
 st.caption("Open to work? EW")
 st.divider()

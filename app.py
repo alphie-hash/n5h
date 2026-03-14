@@ -786,24 +786,24 @@ with st.sidebar:
     existing_connections = load_connections()
     if existing_connections:
         st.markdown(f"**{len(existing_connections):,}** connections loaded")
-    uploaded = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
-    if uploaded:
-        new_connections = parse_connections_csv_bytes(uploaded.read())
-        if new_connections:
-            # Merge: deduplicate by name+email
-            existing_set = {(c["name"].lower(), c["email"].lower()) for c in existing_connections}
-            added = 0
+    uploaded_files = st.file_uploader("Upload CSVs", type=["csv"], label_visibility="collapsed", accept_multiple_files=True)
+    if uploaded_files:
+        existing_set = {(c["name"].lower(), c["email"].lower()) for c in existing_connections}
+        total_added = 0
+        for uploaded in uploaded_files:
+            new_connections = parse_connections_csv_bytes(uploaded.read())
             for c in new_connections:
                 key = (c["name"].lower(), c["email"].lower())
                 if key not in existing_set:
                     existing_connections.append(c)
                     existing_set.add(key)
-                    added += 1
+                    total_added += 1
+        if total_added > 0:
             save_connections(existing_connections)
-            st.toast(f"Added {added} new connections ({len(existing_connections):,} total)", icon="📇")
+            st.toast(f"Added {total_added:,} new connections ({len(existing_connections):,} total)", icon="📇")
             st.rerun()
-        else:
-            st.warning("Couldn't parse CSV — check column headers.")
+        elif uploaded_files:
+            st.info("All connections already loaded (0 new).")
     if existing_connections:
         if st.button("🗑️ Clear all connections", use_container_width=True):
             save_connections([])

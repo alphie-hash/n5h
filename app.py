@@ -806,7 +806,21 @@ def render_candidate(c, idx, role_query, pipeline, connections=None):
                 )
                 if conn_match:
                     net_badge = connection_badge()
-            st.markdown(f"### [{name}](https://github.com/{username}){otw_badge}{net_badge}", unsafe_allow_html=True)
+            # Link name to LinkedIn if available, otherwise GitHub
+            linkedin_url = conn_match.get("linkedin_url") if conn_match else None
+            if linkedin_url:
+                st.markdown(
+                    f'<h3 style="margin:0;padding:0;"><a href="{linkedin_url}" target="_blank" '
+                    f'style="color:#60a5fa;text-decoration:none;">{name} '
+                    f'<span style="font-size:0.6em;vertical-align:middle;">🔗</span></a>'
+                    f'{otw_badge}{net_badge}</h3>',
+                    unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    f'<h3 style="margin:0;padding:0;"><a href="https://github.com/{username}" target="_blank" '
+                    f'style="color:#e0e0e0;text-decoration:none;">{name}</a>'
+                    f'{otw_badge}{net_badge}</h3>',
+                    unsafe_allow_html=True)
             if conn_match:
                 conn_details = []
                 if conn_match.get("title"):   conn_details.append(conn_match["title"])
@@ -859,16 +873,26 @@ def render_candidate(c, idx, role_query, pipeline, connections=None):
                 update_pipeline(username, new_stage)
                 st.rerun()
 
-            # LinkedIn
-            li_name = quote(profile.get("name") or username)
-            st.markdown(
-                f'<a href="https://www.linkedin.com/search/results/people/?keywords={li_name}" '
-                f'target="_blank" style="display:block;text-align:center;padding:8px 12px;'
-                f'background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);'
-                f'border-radius:8px;color:#d0d0d0;text-decoration:none;font-size:0.85rem;'
-                f'font-weight:600;margin-bottom:8px;">🔗 Search LinkedIn</a>',
-                unsafe_allow_html=True,
-            )
+            # LinkedIn — direct link if in network, otherwise search
+            li_url_direct = conn_match.get("linkedin_url") if conn_match else None
+            if li_url_direct:
+                st.markdown(
+                    f'<a href="{li_url_direct}" target="_blank" style="display:block;text-align:center;padding:8px 12px;'
+                    f'background:rgba(10,102,194,0.15);border:1px solid rgba(10,102,194,0.4);'
+                    f'border-radius:8px;color:#60a5fa;text-decoration:none;font-size:0.85rem;'
+                    f'font-weight:600;margin-bottom:8px;">🔗 View LinkedIn</a>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                li_name = quote(profile.get("name") or username)
+                st.markdown(
+                    f'<a href="https://www.linkedin.com/search/results/people/?keywords={li_name}" '
+                    f'target="_blank" style="display:block;text-align:center;padding:8px 12px;'
+                    f'background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);'
+                    f'border-radius:8px;color:#d0d0d0;text-decoration:none;font-size:0.85rem;'
+                    f'font-weight:600;margin-bottom:8px;">🔍 Search LinkedIn</a>',
+                    unsafe_allow_html=True,
+                )
 
             # Outreach — st.code gives a built-in copy button
             if st.button("✉️ Generate Outreach", key=f"outreach_{username}_{idx}"):

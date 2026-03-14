@@ -1401,7 +1401,12 @@ elif search_mode == "📇 My Network":
                             f'vertical-align:middle;">{conn["owner"]}</span>'
                         )
                     if conn.get("linkedin_url"):
-                        st.markdown(f"### [{name}]({conn['linkedin_url']}){owner_badge}", unsafe_allow_html=True)
+                        st.markdown(
+                            f'<h3 style="margin:0;padding:0;"><a href="{conn["linkedin_url"]}" target="_blank" '
+                            f'style="color:#60a5fa;text-decoration:none;">{name} '
+                            f'<span style="font-size:0.6em;vertical-align:middle;">🔗</span></a>'
+                            f'{owner_badge}</h3>',
+                            unsafe_allow_html=True)
                     else:
                         st.markdown(f"### {name}{owner_badge}", unsafe_allow_html=True)
 

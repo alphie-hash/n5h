@@ -881,17 +881,48 @@ if search_mode == "👤 User Search":
         min_followers_val = st.number_input("Min followers", min_value=0, value=0, step=50)
     sel_languages = []
 
+    # Location aliases — common abbreviations map to full names for fuzzy matching
+    LOCATION_ALIASES = {
+        "sf": ["san francisco", "sf", "bay area"],
+        "san francisco": ["san francisco", "sf", "bay area"],
+        "bay area": ["san francisco", "sf", "bay area", "oakland", "san jose", "palo alto", "mountain view", "sunnyvale", "berkeley", "fremont"],
+        "nyc": ["new york", "nyc", "brooklyn", "manhattan"],
+        "new york": ["new york", "nyc", "brooklyn", "manhattan"],
+        "la": ["los angeles", "la", "santa monica", "pasadena", "hollywood"],
+        "los angeles": ["los angeles", "la", "santa monica", "pasadena", "hollywood"],
+        "dc": ["washington", "dc", "d.c."],
+        "washington": ["washington", "dc", "d.c."],
+        "london": ["london", "uk", "united kingdom"],
+        "seattle": ["seattle", "wa", "washington"],
+        "austin": ["austin", "tx", "texas"],
+        "chicago": ["chicago", "il"],
+        "boston": ["boston", "ma", "cambridge"],
+        "denver": ["denver", "co", "colorado", "boulder"],
+        "toronto": ["toronto", "on", "ontario"],
+        "berlin": ["berlin", "germany"],
+        "bangalore": ["bangalore", "bengaluru", "india"],
+    }
+
+    def _location_matches(profile_location, query_loc):
+        """Fuzzy location match — checks aliases and substring."""
+        if not profile_location or not query_loc:
+            return False
+        prof_lower = profile_location.lower()
+        q_lower = query_loc.lower().strip()
+        # Direct substring match
+        if q_lower in prof_lower:
+            return True
+        # Check aliases
+        aliases = LOCATION_ALIASES.get(q_lower, [q_lower])
+        return any(alias in prof_lower for alias in aliases)
+
     def build_user_query():
+        """Build GitHub search query — location & company are POST-filters, not in query."""
         parts = []
         if role_query.strip():
             parts.append(role_query.strip())
-        if location_query.strip():
-            loc = location_query.strip()
-            # Quote multi-word locations for GitHub search
-            if " " in loc:
-                parts.append(f'location:"{loc}"')
-            else:
-                parts.append(f"location:{loc}")
+        # Location and company are NOT added to the query — they are post-filters
+        # This gives us a much larger pool to filter from
         if SENIORITY_MAP[seniority]:
             parts.append(SENIORITY_MAP[seniority])
         elif min_followers_val > 0:
@@ -900,8 +931,14 @@ if search_mode == "👤 User Search":
         return " ".join(parts)
 
     preview = build_user_query()
+    post_filters = []
+    if location_query.strip():
+        post_filters.append(f"location≈{location_query.strip()}")
+    if company_query.strip():
+        post_filters.append(f"company≈{company_query.strip()}")
+    filter_note = f"  →  post-filter: {', '.join(post_filters)}" if post_filters else ""
     if preview.strip() != "type:user":
-        st.caption(f"Query: `{preview}`")
+        st.caption(f"Query: `{preview}`{filter_note}")
 
     search_clicked = st.button("🔍 Find Candidates", type="primary", use_container_width=True)
 
@@ -914,10 +951,12 @@ if search_mode == "👤 User Search":
             st.warning("Add at least one filter to search.")
             st.stop()
 
-        # When company filter is set, fetch a bigger pool to post-filter from
-        fetch_pool = max_candidates
-        if company_query.strip():
-            fetch_pool = min(max_candidates * 5, 300)  # 5x over-fetch for company filtering
+        # Over-fetch when using post-filters (location/company) so we have a big pool
+        has_post_filters = bool(location_query.strip() or company_query.strip())
+        if has_post_filters:
+            fetch_pool = min(max_candidates * 5, 300)
+        else:
+            fetch_pool = max_candidates
 
         with st.spinner("Searching GitHub users…"):
             users, api_err = search_users_direct(final_query, fetch_pool)
@@ -931,7 +970,6 @@ if search_mode == "👤 User Search":
         st.markdown(f"### Fetching {len(users)} profiles…")
         prog = st.progress(0)
         candidates = []
-        company_matches = []
         for i, user in enumerate(users):
             username = user["login"]
             profile  = get_user_profile_cached(username)
@@ -949,23 +987,35 @@ if search_mode == "👤 User Search":
                 "reason":      "",
             }
             candidates.append(entry)
-            # Track company matches separately (soft filter)
-            if company_query.strip():
-                company = (profile.get("company") or "").lower().strip("@ ")
-                bio = (profile.get("bio") or "").lower()
-                if company_query.lower().strip() in company or company_query.lower().strip() in bio:
-                    company_matches.append(entry)
             prog.progress((i + 1) / len(users))
             time.sleep(0.05)
         prog.empty()
 
-        # If company filter was set and got matches, use those; otherwise show all
-        if company_query.strip() and company_matches:
-            candidates = company_matches[:max_candidates]
-            st.info(f"Found {len(company_matches)} profiles matching \"{company_query}\" (from {len(candidates)+len(company_matches)-len(candidates)} scanned).")
-        elif company_query.strip() and not company_matches:
-            candidates = candidates[:max_candidates]
-            st.info(f"ℹ️ No exact \"{company_query}\" matches in {len(candidates)} profiles — showing all.")
+        total_fetched = len(candidates)
+
+        # ── Post-filter: Location ──
+        if location_query.strip():
+            filtered = [c for c in candidates
+                        if _location_matches(c["profile"].get("location", ""), location_query)]
+            if filtered:
+                candidates = filtered
+                st.info(f"📍 {len(filtered)} of {total_fetched} profiles match location \"{location_query}\"")
+            else:
+                st.warning(f"⚠️ No profiles matched location \"{location_query}\" out of {total_fetched} — showing all.")
+
+        # ── Post-filter: Company ──
+        if company_query.strip():
+            comp_q = company_query.lower().strip()
+            filtered = [c for c in candidates
+                        if comp_q in (c["profile"].get("company") or "").lower().strip("@ ")
+                        or comp_q in (c["profile"].get("bio") or "").lower()]
+            if filtered:
+                st.info(f"🏢 {len(filtered)} profiles match company \"{company_query}\"")
+                candidates = filtered
+            else:
+                st.warning(f"⚠️ No profiles matched company \"{company_query}\" — showing all.")
+
+        candidates = candidates[:max_candidates]
 
         if not candidates:
             st.warning("No candidates after filtering. Try broader search.")

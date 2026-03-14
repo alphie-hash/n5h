@@ -670,11 +670,15 @@ if search_mode == "👤 User Search":
     with r2d:
         min_followers_val = st.number_input("Min followers", min_value=0, value=0, step=50)
 
+    if len(sel_languages) > 5:
+        st.warning("⚠️ GitHub works best with ≤5 languages. Only the first 5 will be used in the query.")
+
     def build_user_query():
         parts = []
         if role_query.strip():
             parts.append(role_query.strip())
-        for lang in sel_languages:
+        # Cap at 5 languages to avoid GitHub query limits
+        for lang in sel_languages[:5]:
             parts.append(f"language:{lang}")
         if location_query.strip():
             loc = location_query.strip()
@@ -717,31 +721,38 @@ if search_mode == "👤 User Search":
         st.markdown(f"### Fetching {len(users)} profiles…")
         prog = st.progress(0)
         candidates = []
+        company_matches = []
         for i, user in enumerate(users):
             username = user["login"]
             profile  = get_user_profile_cached(username)
             if not profile:
                 prog.progress((i + 1) / len(users))
                 continue
-            # Post-fetch company filter
-            if company_query.strip():
-                company = (profile.get("company") or "").lower().strip("@ ")
-                if company_query.lower().strip() not in company:
-                    prog.progress((i + 1) / len(users))
-                    continue
             user_repos = get_user_repos(username)
             languages  = get_user_languages(username)
-            candidates.append({
+            entry = {
                 "contributor": {"contributions": 0, "login": username},
                 "profile":     profile,
                 "user_repos":  user_repos,
                 "languages":   languages,
                 "score":       None,
                 "reason":      "",
-            })
+            }
+            candidates.append(entry)
+            # Track company matches separately (soft filter)
+            if company_query.strip():
+                company = (profile.get("company") or "").lower().strip("@ ")
+                if company_query.lower().strip() in company:
+                    company_matches.append(entry)
             prog.progress((i + 1) / len(users))
             time.sleep(0.1)
         prog.empty()
+
+        # If company filter was set and got matches, use those; otherwise show all
+        if company_query.strip() and company_matches:
+            candidates = company_matches
+        elif company_query.strip() and not company_matches:
+            st.info(f"ℹ️ No exact \"{company_query}\" matches — showing all {len(candidates)} candidates.")
 
         if not candidates:
             st.warning("No candidates after filtering. Try broader search.")

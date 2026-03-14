@@ -652,34 +652,27 @@ min_followers_val = 0
 
 # ── User Search ───────────────────────────────
 if search_mode == "👤 User Search":
-    r1a, r1b, r1c = st.columns([3, 2, 1])
+    r1a, r1b = st.columns([4, 1])
     with r1a:
-        role_query = st.text_input("Role / Keywords", placeholder='e.g. "machine learning" OR "pytorch"')
+        role_query = st.text_input("Role / Keywords", placeholder='e.g. "machine learning" OR "full stack" OR "react"')
     with r1b:
-        sel_languages = st.multiselect("Languages", POPULAR_LANGUAGES, placeholder="Any language")
-    with r1c:
         max_candidates = st.selectbox("Candidates", [10, 20, 30], index=0)
 
     r2a, r2b, r2c, r2d = st.columns([2, 2, 1, 1])
     with r2a:
-        location_query = st.text_input("Location", placeholder="e.g. London")
+        location_query = st.text_input("Location", placeholder="e.g. San Francisco")
     with r2b:
         company_query = st.text_input("Company", placeholder="e.g. Google")
     with r2c:
         seniority = st.selectbox("Seniority", list(SENIORITY_MAP.keys()))
     with r2d:
         min_followers_val = st.number_input("Min followers", min_value=0, value=0, step=50)
-
-    if len(sel_languages) > 5:
-        st.warning("⚠️ GitHub works best with ≤5 languages. Only the first 5 will be used in the query.")
+    sel_languages = []
 
     def build_user_query():
         parts = []
         if role_query.strip():
             parts.append(role_query.strip())
-        # Cap at 5 languages to avoid GitHub query limits
-        for lang in sel_languages[:5]:
-            parts.append(f"language:{lang}")
         if location_query.strip():
             loc = location_query.strip()
             # Quote multi-word locations for GitHub search

@@ -570,8 +570,14 @@ hide_contacted   = False
 
 with st.sidebar:
     st.markdown("### ⚙️ Status")
-    st.success("✅ GitHub connected") if GITHUB_TOKEN_OK else st.error("❌ GitHub token missing")
-    st.success("✅ OpenAI connected") if OPENAI_KEY_OK   else st.error("❌ OpenAI key missing")
+    if GITHUB_TOKEN_OK:
+        st.success("✅ GitHub connected")
+    else:
+        st.error("❌ GitHub token missing")
+    if OPENAI_KEY_OK:
+        st.success("✅ OpenAI connected")
+    else:
+        st.error("❌ OpenAI key missing")
     st.divider()
 
     # Pipeline summary

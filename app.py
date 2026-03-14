@@ -928,13 +928,26 @@ if search_mode == "👤 User Search":
             return any(alias in prof_lower for alias in aliases)
         return False
 
-    def build_user_query():
-        """Build GitHub search query — location & company are POST-filters, not in query."""
+    def build_user_query(include_location=True):
+        """Build GitHub search query — location IN query for best results."""
         parts = []
         if role_query.strip():
             parts.append(role_query.strip())
-        # Location and company are NOT added to the query — they are post-filters
-        # This gives us a much larger pool to filter from
+        # Include location in GitHub query for targeted results
+        if include_location and location_query.strip():
+            loc = location_query.strip()
+            # Normalize common aliases & typos to what GitHub understands
+            loc_lower = loc.lower().replace(" ", "")
+            loc_map = {
+                "sf": "San Francisco", "sanfrancisco": "San Francisco",
+                "bayarea": "San Francisco", "bay area": "San Francisco",
+                "nyc": "New York", "newyork": "New York",
+                "la": "Los Angeles", "losangeles": "Los Angeles",
+                "dc": "Washington DC", "washingtondc": "Washington DC",
+                "chi": "Chicago",
+            }
+            gh_loc = loc_map.get(loc_lower, loc_map.get(loc.lower(), loc))
+            parts.append(f"location:\"{gh_loc}\"")
         if SENIORITY_MAP[seniority]:
             parts.append(SENIORITY_MAP[seniority])
         elif min_followers_val > 0:
@@ -943,12 +956,10 @@ if search_mode == "👤 User Search":
         return " ".join(parts)
 
     preview = build_user_query()
-    post_filters = []
-    if location_query.strip():
-        post_filters.append(f"location≈{location_query.strip()}")
+    extra_notes = []
     if company_query.strip():
-        post_filters.append(f"company≈{company_query.strip()}")
-    filter_note = f"  →  post-filter: {', '.join(post_filters)}" if post_filters else ""
+        extra_notes.append(f"company≈{company_query.strip()}")
+    filter_note = f"  →  post-filter: {', '.join(extra_notes)}" if extra_notes else ""
     if preview.strip() != "type:user":
         st.caption(f"Query: `{preview}`{filter_note}")
 
@@ -963,18 +974,34 @@ if search_mode == "👤 User Search":
             st.warning("Add at least one filter to search.")
             st.stop()
 
-        # Over-fetch when using post-filters (location/company) so we have a big pool
-        has_post_filters = bool(location_query.strip() or company_query.strip())
-        if has_post_filters:
-            fetch_pool = min(max_candidates * 5, 300)
+        # Hybrid strategy: search WITH location in GitHub query for targeted results
+        # GitHub Search API returns up to 1000 results (10 pages × 100)
+        has_location = bool(location_query.strip())
+        has_company = bool(company_query.strip())
+        # Over-fetch to ensure enough candidates after company post-filter
+        if has_company:
+            fetch_pool = min(max_candidates * 5, 1000)
         else:
-            fetch_pool = max_candidates
+            fetch_pool = min(max_candidates * 2, 1000)
 
         with st.spinner("Searching GitHub users…"):
+            # Primary search: with location in query (GitHub filters server-side)
             users, api_err = search_users_direct(final_query, fetch_pool)
-        if api_err:
-            st.error(api_err)
-            st.stop()
+            if api_err and not users:
+                st.error(api_err)
+                st.stop()
+
+            # If we still don't have enough, try broader search + local post-filter
+            if has_location and len(users) < max_candidates:
+                broad_query = build_user_query(include_location=False)
+                broad_pool = min(max_candidates * 5, 1000)
+                broad_users, _ = search_users_direct(broad_query, broad_pool)
+                seen = {u["login"] for u in users}
+                for u in broad_users:
+                    if u["login"] not in seen:
+                        users.append(u)
+                        seen.add(u["login"])
+
         if not users:
             st.warning("No users found. Try broader filters.")
             st.stop()

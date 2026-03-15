@@ -701,23 +701,33 @@ def generate_search_queries(role, location="", company="", seniority="", job_des
         context += f"Job Description (first 3000 chars):\n{job_description[:3000]}\n"
 
     num_roles = len(roles_list) if roles_list else 1
-    min_queries = max(5, num_roles * 2)
-    max_queries = max(15, num_roles * 3)
+    min_queries = max(5, num_roles * 3)
+    max_queries = max(15, num_roles * 4)
 
     prompt = f"""Generate GitHub user search queries to find candidates based on this context.
 Use GitHub search syntax: type:user, location:"City", followers:>N.
 
 {context}
 
-CRITICAL RULES:
+CRITICAL RULES (GitHub user search only matches bio/name/login text — NOT repo content):
 - Each query MUST include type:user
-- Each query MUST be SHORT — max 5-6 terms. GitHub rejects long queries.
-- NEVER put paragraphs or sentences into queries. Only concise keywords.
-- If location is provided, include location:"<city>" in most queries — try variations (e.g. "San Francisco", "SF", "Bay Area")
-- Use different keyword combinations in each query for maximum coverage
-- Extract specific technical skills (e.g. CUDA, vLLM, Kubernetes, FastAPI, SOC2, Terraform)
-- You MUST generate at least 2 queries for EACH role listed above. Do NOT skip any role.
-- Include seniority signals via followers count if seniority is specified
+- Each query MUST have only 1-2 keyword terms (besides type:user and location). GitHub search is very literal — fewer keywords = more results.
+- GOOD: type:user CUDA GPU — FINDS users with "CUDA" or "GPU" in their bio
+- BAD: type:user vLLM CUDA PyTorch ML infrastructure — TOO MANY terms, zero results
+- NEVER use more than 2 keywords per query. This is the most important rule.
+- For HALF of the queries, include a location filter. For the other half, do NOT include location — cast a wider net.
+- Location variations: "San Francisco", "SF", "Bay Area", "California"
+- Do NOT add followers:>N unless seniority is explicitly specified
+- Use single high-signal keywords per query: "CUDA", "Kubernetes", "security", "DevOps", "ML", "FastAPI", "Terraform", "electrical"
+- You MUST generate at least 3 queries for EACH role listed above. Do NOT skip any role.
+
+EXAMPLES of good queries:
+- type:user CUDA GPU
+- type:user location:"San Francisco" Kubernetes
+- type:user ML infrastructure
+- type:user location:"Bay Area" security
+- type:user DevOps Terraform
+- type:user location:"SF" Python FastAPI
 
 Generate between {min_queries} and {max_queries} queries. You MUST cover ALL {num_roles} roles.
 

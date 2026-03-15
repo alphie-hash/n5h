@@ -1216,13 +1216,15 @@ if "notes" not in st.session_state:
     st.session_state["notes"] = load_notes()
 
 # ── Sidebar ───────────────────────────────────
-filter_langs     = []
-filter_location  = ""
-filter_min_score = 0.0
-sort_by          = "Score"
-filter_open_only = False
-hide_archived    = False
-hide_contacted   = False
+filter_langs          = []
+filter_location       = ""
+filter_company        = ""
+filter_company_select = []
+filter_min_score      = 0.0
+sort_by               = "Score"
+filter_open_only      = False
+hide_archived         = False
+hide_contacted        = False
 
 with st.sidebar:
     st.markdown("### ⚙️ Status")
@@ -1291,13 +1293,23 @@ with st.sidebar:
 
     # Filters
     if "results" in st.session_state and st.session_state["results"]:
-        st.markdown("### 🎛️ Filters")
+        st.markdown("### 🎛️ Refine Results")
         all_langs = sorted({l for c in st.session_state["results"] for l in c.get("languages", [])})
+        all_companies = sorted({
+            (c["profile"].get("company") or "").strip("@ ").strip()
+            for c in st.session_state["results"]
+            if (c["profile"].get("company") or "").strip()
+        })
         filter_open_only = st.toggle("🟢 Open to work only",      value=False)
         hide_contacted   = st.toggle("👻 Hide already contacted", value=False)
         hide_archived    = st.toggle("🗂️ Hide archived",          value=True)
         filter_langs     = st.multiselect("Language", all_langs)
-        filter_location  = st.text_input("Location contains", placeholder="e.g. London")
+        filter_location  = st.text_input("📍 Location contains", placeholder="e.g. San Francisco")
+        filter_company   = st.text_input("🏢 Company contains", placeholder="e.g. Meta")
+        if all_companies:
+            filter_company_select = st.multiselect("🏢 Or pick companies", all_companies)
+        else:
+            filter_company_select = []
         has_scores = any(c["score"] is not None for c in st.session_state["results"])
         if has_scores:
             filter_min_score = st.slider("Min score", 0.0, 10.0, 0.0, 0.5)
@@ -1348,11 +1360,11 @@ with st.sidebar:
     st.divider()
 
     st.markdown("**How it works**")
-    st.markdown("1. Describe the role & paste/upload JD")
-    st.markdown("2. AI generates 5 search queries for max coverage")
-    st.markdown("3. N5H searches GitHub + LinkedIn in parallel")
+    st.markdown("1. Paste JD / 1-pager or upload PDF")
+    st.markdown("2. AI extracts all roles & generates search queries")
+    st.markdown("3. N5H searches GitHub (+ LinkedIn) in parallel")
     st.markdown("4. AI scores & writes fit conclusions")
-    st.markdown("5. Track pipeline · save · export CSV")
+    st.markdown("5. Refine results → add to pipeline → outreach")
 
 # ── Search Mode ───────────────────────────────
 search_mode = st.radio(
@@ -1372,42 +1384,24 @@ min_followers_val = 0
 
 # ── Search ────────────────────────────────────
 if search_mode == "🔍 Search":
-    r1a, r1b = st.columns([4, 1])
-    with r1a:
-        role_query = st.text_input("Role / Keywords", placeholder='e.g. "machine learning" OR "full stack" OR "react"')
-    with r1b:
-        max_candidates = st.selectbox("Candidates", [50, 100, 250, 500, 1000], index=0)
 
-    r2a, r2b, r2c, r2d = st.columns([2, 2, 1, 1])
-    with r2a:
-        location_query = st.text_input("Location", placeholder="e.g. San Francisco")
-    with r2b:
-        company_query = st.text_input("Company", placeholder="e.g. Google")
-    with r2c:
-        seniority = st.selectbox("Seniority", list(SENIORITY_MAP.keys()))
-    with r2d:
-        min_followers_val = st.number_input("Min followers", min_value=0, value=0, step=50)
-    sel_languages = []
+    # ── Primary input: JD / 1-Pager (the main search tool) ──
+    job_description_text = st.text_area(
+        "📋 Paste your Job Description, 1-Pager, or search query",
+        height=220,
+        placeholder="Paste anything here:\n\n• A full job description or 1-pager document\n• Multiple roles you're hiring for\n• A quick search like \"ML engineer San Francisco\"\n• A company brief with all open positions\n\nN5H will extract roles, skills, and location — then find matching candidates across GitHub.",
+        key="jd_main_input",
+    )
 
-    # Job description — prominent section with text paste + PDF upload
-    st.markdown("#### 📋 Job Description / 1-Pager")
-    st.caption("Paste text, upload a PDF/TXT, or both. The AI will score candidates against this.")
-    jd_col1, jd_col2 = st.columns([3, 1])
-    with jd_col1:
-        job_description_text = st.text_area(
-            "Paste JD text",
-            height=200,
-            placeholder="Paste the full job description, 1-pager, or role requirements here.\n\nThe AI will score candidates against this instead of just keywords.",
-            key="jd_user_search",
-            label_visibility="collapsed",
-        )
-    with jd_col2:
+    # Upload row: PDF/TXT + Candidates count
+    up_col1, up_col2 = st.columns([3, 1])
+    with up_col1:
         jd_file = st.file_uploader(
-            "Upload JD",
+            "Or upload a PDF / TXT",
             type=["pdf", "txt"],
             key="jd_file_upload",
             label_visibility="collapsed",
-            help="Upload a PDF or TXT file containing the job description",
+            help="Upload a PDF or TXT job description",
         )
         jd_file_text = ""
         if jd_file is not None:
@@ -1415,13 +1409,15 @@ if search_mode == "🔍 Search":
             if jd_file.name.lower().endswith(".pdf"):
                 jd_file_text = extract_text_from_pdf(file_bytes)
                 if jd_file_text and not jd_file_text.startswith("[PDF extraction error"):
-                    st.success(f"Extracted {len(jd_file_text):,} chars from PDF")
+                    st.success(f"✅ Extracted {len(jd_file_text):,} chars from PDF")
                 elif jd_file_text.startswith("[PDF extraction error"):
                     st.error(jd_file_text)
                     jd_file_text = ""
             else:
                 jd_file_text = file_bytes.decode("utf-8", errors="ignore")
-                st.success(f"Loaded {len(jd_file_text):,} chars from TXT")
+                st.success(f"✅ Loaded {len(jd_file_text):,} chars from TXT")
+    with up_col2:
+        max_candidates = st.selectbox("Candidates", [50, 100, 250, 500, 1000], index=1)
 
     # Merge pasted text + uploaded file text
     job_description_parts = []
@@ -1430,6 +1426,23 @@ if search_mode == "🔍 Search":
     if jd_file_text.strip():
         job_description_parts.append(jd_file_text.strip())
     job_description = "\n\n".join(job_description_parts)
+
+    # ── Optional refinements (collapsed by default) ──
+    with st.expander("⚙️ Refine search (optional)", expanded=False):
+        ref_col1, ref_col2, ref_col3, ref_col4 = st.columns([2, 2, 1, 1])
+        with ref_col1:
+            location_query = st.text_input("Location", placeholder="e.g. San Francisco", key="loc_refine")
+        with ref_col2:
+            company_query = st.text_input("Company", placeholder="e.g. Google", key="comp_refine")
+        with ref_col3:
+            seniority = st.selectbox("Seniority", list(SENIORITY_MAP.keys()), key="sen_refine")
+        with ref_col4:
+            min_followers_val = st.number_input("Min followers", min_value=0, value=0, step=50, key="fol_refine")
+        st.caption("These are optional — the AI will extract location, company, and seniority from your JD if provided.")
+    sel_languages = []
+
+    # The input IS the role query — but we'll let AI handle it
+    role_query = ""  # AI extracts this from the JD
 
     def build_user_query(include_location=True):
         """Build GitHub search query — location IN query for best results."""
@@ -1458,14 +1471,6 @@ if search_mode == "🔍 Search":
         parts.append("type:user")
         return " ".join(parts)
 
-    preview = build_user_query()
-    extra_notes = []
-    if company_query.strip():
-        extra_notes.append(f"company≈{company_query.strip()}")
-    filter_note = f"  →  post-filter: {', '.join(extra_notes)}" if extra_notes else ""
-    if preview.strip() != "type:user":
-        st.caption(f"Query: `{preview}`{filter_note}")
-
     search_clicked = st.button("🔍 Find Candidates", type="primary", use_container_width=True)
 
     if search_clicked:
@@ -1473,17 +1478,8 @@ if search_mode == "🔍 Search":
             st.error("Missing API keys — add them to `~/n5h/.env`")
             st.stop()
 
-        # Auto-detect: if Role/Keywords is very long (>200 chars), treat it as a JD
-        if len(role_query.strip()) > 200:
-            st.info("📋 Detected long text in Role/Keywords — treating as Job Description")
-            if not job_description.strip():
-                job_description = role_query.strip()
-            else:
-                job_description = role_query.strip() + "\n\n" + job_description
-            role_query = ""  # Clear — AI will extract keywords from JD
-
-        # If no role keywords but JD is provided, extract keywords from JD
-        if not role_query.strip() and job_description.strip():
+        # AI extracts roles & keywords from the JD
+        if job_description.strip():
             with st.spinner("🤖 Analyzing job description — extracting roles & keywords…"):
                 # First, identify all roles in the JD
                 roles_found = extract_roles_from_jd(job_description)
@@ -1499,7 +1495,7 @@ if search_mode == "🔍 Search":
                         st.info(f"🔍 Searching for: **{extracted}** (extracted from JD)")
 
         if not role_query.strip() and not job_description.strip():
-            st.warning("Add at least one filter or paste a job description.")
+            st.warning("Paste a job description, upload a PDF, or type a search query.")
             st.stop()
 
         # ── Multi-query strategy: generate queries via AI (multi-role aware) ──
@@ -1996,7 +1992,16 @@ if "results" in st.session_state and st.session_state["results"]:
     if filter_langs:
         display = [c for c in display if any(l in c.get("languages", []) for l in filter_langs)]
     if filter_location:
-        display = [c for c in display if filter_location.lower() in (c["profile"].get("location") or "").lower()]
+        display = [c for c in display if _location_matches(c["profile"].get("location", ""), filter_location)]
+    if filter_company:
+        comp_q = filter_company.lower().strip()
+        display = [c for c in display
+                    if comp_q in (c["profile"].get("company") or "").lower().strip("@ ")
+                    or comp_q in (c["profile"].get("bio") or "").lower()]
+    if filter_company_select:
+        sel_lower = {co.lower() for co in filter_company_select}
+        display = [c for c in display
+                    if (c["profile"].get("company") or "").strip("@ ").strip().lower() in sel_lower]
     if filter_min_score > 0:
         display = [c for c in display if (c["score"] or 0) >= filter_min_score]
 

@@ -677,7 +677,7 @@ If the document describes a company with multiple roles, extract ALL of them (up
     except Exception:
         return []
 
-def generate_search_queries(role, location="", company="", seniority="", job_description=""):
+def generate_search_queries(role, location="", company="", seniority="", job_description="", roles_list=None):
     """Use AI to generate diverse GitHub search queries — handles multi-role JDs."""
     from openai import OpenAI
     client = OpenAI(api_key=OPENAI_API_KEY)
@@ -687,7 +687,22 @@ def generate_search_queries(role, location="", company="", seniority="", job_des
     if location: context += f"Location: {location}\n"
     if company: context += f"Company: {company}\n"
     if seniority and seniority != "Any": context += f"Seniority: {seniority}\n"
-    if job_description: context += f"Job Description (first 3000 chars):\n{job_description[:3000]}\n"
+
+    # If we have explicit roles list, format them clearly
+    if roles_list and len(roles_list) > 0:
+        context += "\n=== ROLES TO SEARCH FOR (generate queries for EVERY role) ===\n"
+        for i, r in enumerate(roles_list, 1):
+            title = r.get("title", "Unknown")
+            skills = r.get("skills", [])
+            terms = r.get("search_terms", "")
+            context += f"Role {i}: {title} | Skills: {', '.join(skills) if skills else 'N/A'} | Search: {terms}\n"
+        context += "=== END ROLES ===\n"
+    elif job_description:
+        context += f"Job Description (first 3000 chars):\n{job_description[:3000]}\n"
+
+    num_roles = len(roles_list) if roles_list else 1
+    min_queries = max(5, num_roles * 2)
+    max_queries = max(15, num_roles * 3)
 
     prompt = f"""Generate GitHub user search queries to find candidates based on this context.
 Use GitHub search syntax: type:user, location:"City", followers:>N.
@@ -700,11 +715,11 @@ CRITICAL RULES:
 - NEVER put paragraphs or sentences into queries. Only concise keywords.
 - If location is provided, include location:"<city>" in most queries — try variations (e.g. "San Francisco", "SF", "Bay Area")
 - Use different keyword combinations in each query for maximum coverage
-- Extract specific technical skills from the JD (e.g. CUDA, vLLM, Kubernetes, FastAPI)
-- If the JD describes MULTIPLE roles, generate 2-3 queries per role
+- Extract specific technical skills (e.g. CUDA, vLLM, Kubernetes, FastAPI, SOC2, Terraform)
+- You MUST generate at least 2 queries for EACH role listed above. Do NOT skip any role.
 - Include seniority signals via followers count if seniority is specified
 
-Generate between 5 and 15 queries depending on how many distinct roles are in the JD.
+Generate between {min_queries} and {max_queries} queries. You MUST cover ALL {num_roles} roles.
 
 Reply with ONLY a JSON array of query strings:
 ["query1", "query2", ...]"""
@@ -713,14 +728,14 @@ Reply with ONLY a JSON array of query strings:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=1000,
+            max_tokens=2000,
             temperature=0.7,
         )
         raw = resp.choices[0].message.content.strip()
         queries = json.loads(raw[raw.find("["):raw.rfind("]")+1])
         # Validate: reject any query longer than 200 chars (safety net)
         valid = [q for q in queries if len(q) < 200 and "type:user" in q]
-        return valid[:15]
+        return valid[:max_queries]
     except Exception:
         return []
 
@@ -815,12 +830,14 @@ def score_candidates_batch(candidates, role, job_description=""):
     # Build scoring prompt — use full JD if provided
     if job_description and job_description.strip():
         jd_block = (
-            f"ROLE: {role}\n\n"
+            f"ROLES BEING HIRED: {role}\n\n"
             f"FULL JOB DESCRIPTION / 1-PAGER:\n{job_description.strip()}\n\n"
-            "Score each developer 0.0-10.0 based on how well they match the job description above.\n"
+            "Score each developer 0.0-10.0 based on how well they match ANY of the roles in the job description above.\n"
+            "A candidate only needs to be a strong fit for ONE of the listed roles to score highly.\n"
             "Criteria: required skills match, experience level, repo relevance, language fit, "
             "domain expertise alignment with the JD.\n"
-            "Weight heavily: specific technical skills mentioned in the JD, relevant project experience, seniority signals.\n\n"
+            "Weight heavily: specific technical skills mentioned in the JD, relevant project experience, seniority signals.\n"
+            "In the conclusion, specify WHICH role(s) they best fit.\n\n"
         )
     else:
         jd_block = (
@@ -1479,6 +1496,7 @@ if search_mode == "🔍 Search":
             st.stop()
 
         # AI extracts roles & keywords from the JD
+        roles_found = []
         if job_description.strip():
             with st.spinner("🤖 Analyzing job description — extracting roles & keywords…"):
                 # First, identify all roles in the JD
@@ -1486,8 +1504,13 @@ if search_mode == "🔍 Search":
                 if roles_found:
                     role_titles = [r.get("title", "") for r in roles_found if r.get("title")]
                     st.info(f"🎯 Found **{len(roles_found)} role{'s' if len(roles_found) > 1 else ''}** in JD: {', '.join(role_titles)}")
-                    # Use the first role's search terms as the primary query for scoring
-                    role_query = roles_found[0].get("search_terms", "") or roles_found[0].get("title", "")
+                    # Combine ALL role search terms so scoring covers every role
+                    all_terms = []
+                    for r in roles_found:
+                        t = r.get("search_terms", "") or r.get("title", "")
+                        if t:
+                            all_terms.append(t)
+                    role_query = " | ".join(all_terms) if all_terms else roles_found[0].get("title", "")
                 else:
                     extracted = extract_search_keywords(job_description)
                     if extracted:
@@ -1499,9 +1522,10 @@ if search_mode == "🔍 Search":
             st.stop()
 
         # ── Multi-query strategy: generate queries via AI (multi-role aware) ──
-        with st.spinner("🤖 Generating search queries…"):
+        with st.spinner(f"🤖 Generating search queries for {len(roles_found) if roles_found else 1} role{'s' if len(roles_found) != 1 else ''}…"):
             ai_queries = generate_search_queries(
-                role_query, location_query, company_query, seniority, job_description
+                role_query, location_query, company_query, seniority, job_description,
+                roles_list=roles_found if roles_found else None
             )
 
         # Fallback to single query if AI generation fails

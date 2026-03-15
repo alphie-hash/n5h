@@ -447,10 +447,12 @@ def _secret(key):
 
 GITHUB_TOKEN   = _secret("GITHUB_TOKEN")
 OPENAI_API_KEY = _secret("OPENAI_API_KEY")
+PROXYCURL_API_KEY = _secret("PROXYCURL_API_KEY")
 
 _PLACEHOLDER    = {"your_github_token_here", "your_openai_api_key_here", "", None}
 GITHUB_TOKEN_OK = GITHUB_TOKEN not in _PLACEHOLDER
 OPENAI_KEY_OK   = OPENAI_API_KEY not in _PLACEHOLDER
+PROXYCURL_OK    = PROXYCURL_API_KEY not in _PLACEHOLDER
 
 HEADERS = {
     "Authorization": f"token {GITHUB_TOKEN}",
@@ -643,6 +645,117 @@ Reply with ONLY the search query, nothing else. Example: "machine learning pytho
         return ""
 
 # ─────────────────────────────────────────────
+# Multi-Query Search Strategy
+# ─────────────────────────────────────────────
+def generate_search_queries(role, location="", company="", seniority="", job_description=""):
+    """Use AI to generate 5 diverse GitHub search queries for maximum coverage."""
+    from openai import OpenAI
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    context = f"Role: {role}\n"
+    if location: context += f"Location: {location}\n"
+    if company: context += f"Company: {company}\n"
+    if seniority and seniority != "Any": context += f"Seniority: {seniority}\n"
+    if job_description: context += f"Job Description:\n{job_description[:2000]}\n"
+
+    prompt = f"""Generate exactly 5 different GitHub user search queries to find candidates for this role.
+Each query should use different keyword combinations to cast the widest possible net.
+Use GitHub search syntax (type:user, location:"City", followers:>N).
+
+{context}
+
+Rules:
+- Each query MUST include type:user
+- If location is provided, include location:"<city>" in at least 3 queries, but try variations (e.g. "San Francisco", "SF", "Bay Area")
+- Use different role keywords in each query (e.g. "machine learning", "ML engineer", "deep learning", "data scientist", "AI researcher")
+- Extract technical skills from the JD and use them as keywords
+- Include seniority signals via followers count if seniority is specified
+- Keep each query concise — GitHub search works best with 3-5 terms
+
+Reply with ONLY a JSON array of 5 query strings, nothing else:
+["query1", "query2", "query3", "query4", "query5"]"""
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=500,
+            temperature=0.7,
+        )
+        raw = resp.choices[0].message.content.strip()
+        queries = json.loads(raw[raw.find("["):raw.rfind("]")+1])
+        return queries[:5]
+    except Exception:
+        # Fallback: just return empty list
+        return []
+
+# ─────────────────────────────────────────────
+# Proxycurl LinkedIn Integration
+# ─────────────────────────────────────────────
+def search_linkedin_profiles(role, location="", company="", max_results=50):
+    """Search LinkedIn via Proxycurl Person Search API."""
+    if not PROXYCURL_OK:
+        return [], "Proxycurl API key not configured"
+
+    url = "https://nubela.co/proxycurl/api/search/person/"
+    headers = {"Authorization": f"Bearer {PROXYCURL_API_KEY}"}
+    params = {
+        "country": "US",  # default
+        "page_size": min(max_results, 100),
+    }
+    if role:
+        params["current_role_title"] = role
+    if company:
+        params["current_company_name"] = company
+    if location:
+        params["city"] = location
+
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=30)
+        if r.status_code == 200:
+            data = r.json()
+            profiles = data.get("results", [])
+            return profiles, None
+        return [], f"Proxycurl API error {r.status_code}: {r.text[:200]}"
+    except Exception as e:
+        return [], str(e)
+
+def enrich_with_linkedin(github_username, name=""):
+    """Try to find a LinkedIn profile for a GitHub user."""
+    if not PROXYCURL_OK:
+        return None
+    url = "https://nubela.co/proxycurl/api/linkedin/profile/resolve"
+    headers = {"Authorization": f"Bearer {PROXYCURL_API_KEY}"}
+    params = {}
+    if name:
+        params["first_name"] = name.split()[0] if " " in name else name
+        if " " in name:
+            params["last_name"] = name.split()[-1]
+
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=15)
+        if r.status_code == 200:
+            return r.json().get("url")
+    except Exception:
+        pass
+    return None
+
+# ─────────────────────────────────────────────
+# PDF Text Extraction
+# ─────────────────────────────────────────────
+def extract_text_from_pdf(file_bytes):
+    """Extract text from a PDF file using PyPDF2."""
+    try:
+        from PyPDF2 import PdfReader
+        reader = PdfReader(io.BytesIO(file_bytes))
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() or ""
+        return text.strip()
+    except Exception as e:
+        return f"[PDF extraction error: {e}]"
+
+# ─────────────────────────────────────────────
 # Batch AI Scorer
 # ─────────────────────────────────────────────
 def score_candidates_batch(candidates, role, job_description=""):
@@ -683,19 +796,19 @@ def score_candidates_batch(candidates, role, job_description=""):
     prompt = (
         jd_block
         + "\n".join(lines)
-        + '\n\nReply ONLY with a JSON array in the same order:\n[{"i":0,"score":7.5,"reason":"one sentence max 12 words"},...]'
+        + '\n\nReply ONLY with a JSON array in the same order:\n[{"i":0,"score":7.5,"reason":"one sentence max 12 words","conclusion":"2-3 sentence analysis of how this person\'s specific skills and experience connect to the role requirements."},...]'
     )
 
     try:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=max(200, len(candidates) * 35),
+            max_tokens=max(200, len(candidates) * 80),
             temperature=0.2,
         )
         raw  = resp.choices[0].message.content.strip()
         data = json.loads(raw[raw.find("[") : raw.rfind("]") + 1])
-        return {item["i"]: (round(float(item["score"]), 1), item.get("reason", "")) for item in data}, None
+        return {item["i"]: (round(float(item["score"]), 1), item.get("reason", ""), item.get("conclusion", "")) for item in data}, None
     except Exception as e:
         err = str(e)
         if "insufficient_quota" in err or "429" in err:
@@ -838,6 +951,7 @@ def render_candidate(c, idx, role_query, pipeline, connections=None):
     languages   = c.get("languages", [])
     score       = c.get("score")
     reason      = c.get("reason", "")
+    conclusion  = c.get("conclusion", "")
     contributor = c.get("contributor", {})
     stage       = pipeline.get(username, {}).get("stage", "New")
 
@@ -850,6 +964,13 @@ def render_candidate(c, idx, role_query, pipeline, connections=None):
             st.markdown(score_badge(score), unsafe_allow_html=True)
             if reason:
                 st.caption(reason)
+            if conclusion:
+                st.markdown(
+                    f'<div style="font-size:0.75rem;color:#9ca3af;line-height:1.4;'
+                    f'margin:6px 0;padding:6px 8px;background:rgba(255,255,255,0.03);'
+                    f'border-radius:8px;border-left:2px solid rgba(255,255,255,0.15);">'
+                    f'{conclusion}</div>',
+                    unsafe_allow_html=True)
             st.markdown(pipeline_badge(stage), unsafe_allow_html=True)
 
         with col_info:
@@ -1078,6 +1199,10 @@ with st.sidebar:
         st.success("✅ OpenAI connected")
     else:
         st.error("❌ OpenAI key missing")
+    if PROXYCURL_OK:
+        st.success("✅ Proxycurl connected")
+    else:
+        st.caption("ℹ️ Proxycurl not configured (optional)")
     st.divider()
 
     # Projects & Pipeline
@@ -1188,14 +1313,15 @@ with st.sidebar:
     st.divider()
 
     st.markdown("**How it works**")
-    st.markdown("1. Set filters & describe the role")
-    st.markdown("2. N5H finds developers on GitHub")
-    st.markdown("3. AI scores all candidates in one batch")
-    st.markdown("4. Track pipeline · save · export CSV")
+    st.markdown("1. Describe the role & paste/upload JD")
+    st.markdown("2. AI generates 5 search queries for max coverage")
+    st.markdown("3. N5H searches GitHub + LinkedIn in parallel")
+    st.markdown("4. AI scores & writes fit conclusions")
+    st.markdown("5. Track pipeline · save · export CSV")
 
 # ── Search Mode ───────────────────────────────
 search_mode = st.radio(
-    "mode", ["👤 User Search", "📁 Repo Search", "📇 My Network"],
+    "mode", ["🔍 Search", "📇 My Network"],
     horizontal=True, label_visibility="collapsed",
 )
 st.markdown("")
@@ -1209,8 +1335,8 @@ company_query     = ""
 seniority         = "Any"
 min_followers_val = 0
 
-# ── User Search ───────────────────────────────
-if search_mode == "👤 User Search":
+# ── Search ────────────────────────────────────
+if search_mode == "🔍 Search":
     r1a, r1b = st.columns([4, 1])
     with r1a:
         role_query = st.text_input("Role / Keywords", placeholder='e.g. "machine learning" OR "full stack" OR "react"')
@@ -1228,15 +1354,47 @@ if search_mode == "👤 User Search":
         min_followers_val = st.number_input("Min followers", min_value=0, value=0, step=50)
     sel_languages = []
 
-    # Job description for AI scoring
-    with st.expander("📋 Paste Job Description / 1-Pager (optional — improves AI scoring)", expanded=False):
-        job_description = st.text_area(
-            "Job Description",
-            height=250,
+    # Job description — prominent section with text paste + PDF upload
+    st.markdown("#### 📋 Job Description / 1-Pager")
+    st.caption("Paste text, upload a PDF/TXT, or both. The AI will score candidates against this.")
+    jd_col1, jd_col2 = st.columns([3, 1])
+    with jd_col1:
+        job_description_text = st.text_area(
+            "Paste JD text",
+            height=200,
             placeholder="Paste the full job description, 1-pager, or role requirements here.\n\nThe AI will score candidates against this instead of just keywords.",
             key="jd_user_search",
             label_visibility="collapsed",
         )
+    with jd_col2:
+        jd_file = st.file_uploader(
+            "Upload JD",
+            type=["pdf", "txt"],
+            key="jd_file_upload",
+            label_visibility="collapsed",
+            help="Upload a PDF or TXT file containing the job description",
+        )
+        jd_file_text = ""
+        if jd_file is not None:
+            file_bytes = jd_file.read()
+            if jd_file.name.lower().endswith(".pdf"):
+                jd_file_text = extract_text_from_pdf(file_bytes)
+                if jd_file_text and not jd_file_text.startswith("[PDF extraction error"):
+                    st.success(f"Extracted {len(jd_file_text):,} chars from PDF")
+                elif jd_file_text.startswith("[PDF extraction error"):
+                    st.error(jd_file_text)
+                    jd_file_text = ""
+            else:
+                jd_file_text = file_bytes.decode("utf-8", errors="ignore")
+                st.success(f"Loaded {len(jd_file_text):,} chars from TXT")
+
+    # Merge pasted text + uploaded file text
+    job_description_parts = []
+    if job_description_text.strip():
+        job_description_parts.append(job_description_text.strip())
+    if jd_file_text.strip():
+        job_description_parts.append(jd_file_text.strip())
+    job_description = "\n\n".join(job_description_parts)
 
     def build_user_query(include_location=True):
         """Build GitHub search query — location IN query for best results."""
@@ -1288,40 +1446,73 @@ if search_mode == "👤 User Search":
                 role_query = extracted
                 st.info(f"🔍 Searching for: **{extracted}** (extracted from JD)")
 
-        final_query = build_user_query()
-        if final_query.strip() == "type:user":
+        if not role_query.strip() and not job_description.strip():
             st.warning("Add at least one filter or paste a job description.")
             st.stop()
 
-        # Location is in the GitHub query — no need to over-fetch
-        has_location = bool(location_query.strip())
-        has_company = bool(company_query.strip())
-        # Only over-fetch if company post-filter is active
-        if has_company:
-            fetch_pool = min(max_candidates * 3, 1000)  # GitHub Search caps at 1000
-        else:
-            fetch_pool = min(max_candidates, 1000)
+        # ── Multi-query strategy: generate 5 queries via AI ──
+        with st.spinner("🤖 Generating search queries…"):
+            ai_queries = generate_search_queries(
+                role_query, location_query, company_query, seniority, job_description
+            )
 
-        with st.spinner("Searching GitHub users…"):
-            users, api_err = search_users_direct(final_query, fetch_pool)
-            if api_err and not users:
-                st.error(api_err)
+        # Fallback to single query if AI generation fails
+        if not ai_queries:
+            ai_queries = [build_user_query()]
+
+        with st.expander(f"🔎 Running {len(ai_queries)} search queries", expanded=False):
+            for qi, q in enumerate(ai_queries, 1):
+                st.markdown(f"**Query {qi}:** `{q}`")
+
+        # ── Run all queries in parallel using ThreadPoolExecutor ──
+        per_query_limit = 200
+        all_users = []
+        seen_logins = set()
+
+        def _run_query(query):
+            """Run a single GitHub search query."""
+            results, err = search_users_direct(query, per_query_limit)
+            if err and not results:
+                return [], err
+            return results, None
+
+        with st.spinner(f"Searching GitHub with {len(ai_queries)} queries…"):
+            query_errors = []
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {executor.submit(_run_query, q): q for q in ai_queries}
+                for future in as_completed(futures):
+                    users_batch, err = future.result()
+                    if err:
+                        query_errors.append(err)
+                    for u in users_batch:
+                        if u["login"] not in seen_logins:
+                            seen_logins.add(u["login"])
+                            all_users.append(u)
+
+            if query_errors and not all_users:
+                st.error(f"All queries failed: {query_errors[0]}")
                 st.stop()
 
-            # Fallback: if location query returned too few, broaden search
-            if has_location and len(users) < max_candidates:
-                broad_query = build_user_query(include_location=False)
-                broad_pool = min(max_candidates * 3, 1000)
-                broad_users, _ = search_users_direct(broad_query, broad_pool)
-                seen = {u["login"] for u in users}
-                for u in broad_users:
-                    if u["login"] not in seen:
-                        users.append(u)
-                        seen.add(u["login"])
+        # ── Proxycurl LinkedIn search (if configured) ──
+        linkedin_profiles = []
+        if PROXYCURL_OK:
+            with st.spinner("🔍 Searching LinkedIn via Proxycurl…"):
+                li_results, li_err = search_linkedin_profiles(
+                    role_query, location_query, company_query, max_results=50
+                )
+                if li_err:
+                    st.caption(f"LinkedIn search note: {li_err}")
+                if li_results:
+                    linkedin_profiles = li_results
+                    st.info(f"🔗 Found {len(li_results)} LinkedIn profiles")
 
-        if not users:
+        st.info(f"Found **{len(all_users)}** unique GitHub candidates across {len(ai_queries)} queries")
+
+        if not all_users:
             st.warning("No users found. Try broader filters.")
             st.stop()
+
+        users = all_users
 
         # ── Parallel profile fetching (25 threads) — blazing fast ──
         st.markdown(f"### ⚡ Fetching {len(users)} profiles…")
@@ -1350,6 +1541,7 @@ if search_mode == "👤 User Search":
                 "languages": languages,
                 "score": None,
                 "reason": "",
+                "conclusion": "",
             }
 
         candidates = []
@@ -1398,7 +1590,7 @@ if search_mode == "👤 User Search":
             st.stop()
 
         score_label = role_query or ", ".join(sel_languages) or "the role"
-        jd_text = job_description if 'job_description' in dir() else ""
+        jd_text = job_description
 
         # Batch scoring — split into chunks for large candidate sets
         SCORE_BATCH = 50
@@ -1428,163 +1620,14 @@ if search_mode == "👤 User Search":
 
         for i, c in enumerate(candidates):
             if i in scores:
-                c["score"], c["reason"] = scores[i]
+                score_tuple = scores[i]
+                c["score"] = score_tuple[0]
+                c["reason"] = score_tuple[1] if len(score_tuple) > 1 else ""
+                c["conclusion"] = score_tuple[2] if len(score_tuple) > 2 else ""
 
         candidates.sort(key=lambda x: (x["score"] is not None, x["score"] or 0), reverse=True)
         st.session_state["results"]     = candidates
         st.session_state["loaded_role"] = score_label
-        st.session_state["res_page"]    = 0
-
-# ── Repo Search ───────────────────────────────
-elif search_mode == "📁 Repo Search":
-    col1, col2 = st.columns([4, 1])
-    with col1:
-        role_query = st.text_input(
-            "Describe the role",
-            placeholder="e.g. Senior ML Engineer specialising in PyTorch and CUDA",
-        )
-    with col2:
-        max_candidates = st.selectbox("Candidates", [50, 100, 250, 500, 1000], index=0)
-
-    with st.expander("📋 Paste Job Description / 1-Pager (optional — improves AI scoring)", expanded=False):
-        job_description = st.text_area(
-            "Job Description",
-            height=250,
-            placeholder="Paste the full job description, 1-pager, or role requirements here.",
-            key="jd_repo_search",
-            label_visibility="collapsed",
-        )
-
-    search_clicked = st.button("🔍 Find Candidates", type="primary", use_container_width=True)
-
-    if search_clicked:
-        # Extract keywords from JD if no role query
-        if not role_query.strip() and job_description.strip():
-            with st.spinner("🤖 Extracting search keywords from job description…"):
-                extracted = extract_search_keywords(job_description)
-            if extracted:
-                role_query = extracted
-                st.info(f"🔍 Searching for: **{extracted}** (extracted from JD)")
-        if not role_query:
-            st.warning("Please enter a role description or paste a job description.")
-            st.stop()
-        if not GITHUB_TOKEN_OK or not OPENAI_KEY_OK:
-            st.error("Missing API keys — add them to `~/n5h/.env`")
-            st.stop()
-
-        with st.spinner("Searching GitHub for the most relevant repositories…"):
-            # More repos for larger candidate counts
-            n_repos = min(10, max(4, max_candidates // 50))
-            repos, api_err = search_repos(role_query, max_repos=n_repos)
-        if api_err:
-            st.error(api_err)
-            st.stop()
-        if not repos:
-            st.error("No repositories found. Try a different search term.")
-            st.stop()
-
-        with st.expander(f"📁 {len(repos)} repositories analysed", expanded=False):
-            for repo in repos:
-                st.markdown(
-                    f"**[{repo['full_name']}]({repo['html_url']})** "
-                    f"⭐ {repo['stargazers_count']:,}  —  {(repo.get('description') or '')[:120]}"
-                )
-
-        st.markdown("### Finding top contributors…")
-        prog = st.progress(0)
-        all_contributors, seen = [], set()
-        # More repos for large candidate counts
-        max_repos_search = min(10, max(4, max_candidates // 50))
-        per_repo = max(10, max_candidates // max_repos_search + 5)
-        for i, repo in enumerate(repos[:max_repos_search]):
-            for c in get_contributors(repo["owner"]["login"], repo["name"], min(per_repo, 100)):
-                if c.get("login") not in seen and c.get("type") == "User":
-                    seen.add(c["login"])
-                    all_contributors.append(c)
-            prog.progress((i + 1) / len(repos[:max_repos_search]))
-            time.sleep(0.05)
-        prog.empty()
-        all_contributors = all_contributors[:max_candidates]
-
-        if not all_contributors:
-            st.warning("No contributors found.")
-            st.stop()
-
-        # ── Parallel profile fetching (25 threads) — blazing fast ──
-        st.markdown(f"### ⚡ Fetching {len(all_contributors)} profiles…")
-        fetch_prog = st.progress(0)
-        cache = _load_cache()
-
-        def _fetch_one_contributor(contributor):
-            username = contributor["login"]
-            entry = cache.get(username)
-            if entry and time.time() - entry.get("ts", 0) < CACHE_TTL:
-                profile = entry["data"]
-            else:
-                profile = _fetch_user_profile(username)
-                if profile:
-                    cache[username] = {"ts": time.time(), "data": profile}
-            if not profile:
-                return None
-            user_repos = get_user_repos(username)
-            languages = get_user_languages(username, repos=user_repos)
-            return {
-                "contributor": contributor,
-                "profile": profile,
-                "user_repos": user_repos,
-                "languages": languages,
-                "score": None,
-                "reason": "",
-            }
-
-        candidates = []
-        done = 0
-        with ThreadPoolExecutor(max_workers=25) as executor:
-            futures = {executor.submit(_fetch_one_contributor, c): c for c in all_contributors}
-            for future in as_completed(futures):
-                done += 1
-                fetch_prog.progress(done / len(all_contributors))
-                result = future.result()
-                if result:
-                    candidates.append(result)
-        fetch_prog.empty()
-        _save_cache(cache)
-
-        jd_text = job_description if 'job_description' in dir() else ""
-
-        # Batch scoring — split into chunks for large candidate sets
-        SCORE_BATCH = 50
-        if len(candidates) <= SCORE_BATCH:
-            st.markdown(f"### 🤖 Scoring {len(candidates)} candidates…")
-            scores, score_err = score_candidates_batch(candidates, role_query, jd_text)
-        else:
-            st.markdown(f"### 🤖 Scoring {len(candidates)} candidates in batches of {SCORE_BATCH}…")
-            score_prog = st.progress(0)
-            scores, score_err = {}, None
-            for batch_start in range(0, len(candidates), SCORE_BATCH):
-                batch = candidates[batch_start:batch_start + SCORE_BATCH]
-                batch_scores, err = score_candidates_batch(batch, role_query, jd_text)
-                if err:
-                    score_err = err
-                    if err == "quota":
-                        break
-                for local_i, val in batch_scores.items():
-                    scores[batch_start + local_i] = val
-                score_prog.progress(min(1.0, (batch_start + SCORE_BATCH) / len(candidates)))
-            score_prog.empty()
-
-        if score_err == "quota":
-            st.warning("⚠️ OpenAI quota exceeded — candidates shown unscored.")
-        elif score_err:
-            st.warning(f"Scoring issue: {score_err}")
-
-        for i, c in enumerate(candidates):
-            if i in scores:
-                c["score"], c["reason"] = scores[i]
-
-        candidates.sort(key=lambda x: (x["score"] is not None, x["score"] or 0), reverse=True)
-        st.session_state["results"]     = candidates
-        st.session_state["loaded_role"] = role_query
         st.session_state["res_page"]    = 0
 
 # ── My Network Search ─────────────────────────

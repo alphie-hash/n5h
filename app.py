@@ -647,46 +647,81 @@ Reply with ONLY the search query, nothing else. Example: "machine learning pytho
 # ─────────────────────────────────────────────
 # Multi-Query Search Strategy
 # ─────────────────────────────────────────────
-def generate_search_queries(role, location="", company="", seniority="", job_description=""):
-    """Use AI to generate 5 diverse GitHub search queries for maximum coverage."""
+def extract_roles_from_jd(job_description):
+    """Use AI to identify all distinct roles mentioned in a job description."""
     from openai import OpenAI
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    context = f"Role: {role}\n"
+    prompt = f"""Analyze this job description / company brief and identify ALL distinct roles being hired for.
+For each role, extract: the title, key technical skills, and what to search for on GitHub.
+
+Job Description:
+{job_description[:4000]}
+
+Reply with ONLY a JSON array of role objects:
+[{{"title": "ML Infrastructure Engineer", "skills": ["vLLM", "TensorRT", "CUDA", "PyTorch"], "search_terms": "ML infrastructure GPU CUDA"}}, ...]
+
+If there is only ONE role, return an array with one object.
+If the document describes a company with multiple roles, extract ALL of them (up to 10).
+"""
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1000,
+            temperature=0.3,
+        )
+        raw = resp.choices[0].message.content.strip()
+        roles = json.loads(raw[raw.find("["):raw.rfind("]")+1])
+        return roles[:10]
+    except Exception:
+        return []
+
+def generate_search_queries(role, location="", company="", seniority="", job_description=""):
+    """Use AI to generate diverse GitHub search queries — handles multi-role JDs."""
+    from openai import OpenAI
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    context = ""
+    if role: context += f"Role keywords: {role}\n"
     if location: context += f"Location: {location}\n"
     if company: context += f"Company: {company}\n"
     if seniority and seniority != "Any": context += f"Seniority: {seniority}\n"
-    if job_description: context += f"Job Description:\n{job_description[:2000]}\n"
+    if job_description: context += f"Job Description (first 3000 chars):\n{job_description[:3000]}\n"
 
-    prompt = f"""Generate exactly 5 different GitHub user search queries to find candidates for this role.
-Each query should use different keyword combinations to cast the widest possible net.
-Use GitHub search syntax (type:user, location:"City", followers:>N).
+    prompt = f"""Generate GitHub user search queries to find candidates based on this context.
+Use GitHub search syntax: type:user, location:"City", followers:>N.
 
 {context}
 
-Rules:
+CRITICAL RULES:
 - Each query MUST include type:user
-- If location is provided, include location:"<city>" in at least 3 queries, but try variations (e.g. "San Francisco", "SF", "Bay Area")
-- Use different role keywords in each query (e.g. "machine learning", "ML engineer", "deep learning", "data scientist", "AI researcher")
-- Extract technical skills from the JD and use them as keywords
+- Each query MUST be SHORT — max 5-6 terms. GitHub rejects long queries.
+- NEVER put paragraphs or sentences into queries. Only concise keywords.
+- If location is provided, include location:"<city>" in most queries — try variations (e.g. "San Francisco", "SF", "Bay Area")
+- Use different keyword combinations in each query for maximum coverage
+- Extract specific technical skills from the JD (e.g. CUDA, vLLM, Kubernetes, FastAPI)
+- If the JD describes MULTIPLE roles, generate 2-3 queries per role
 - Include seniority signals via followers count if seniority is specified
-- Keep each query concise — GitHub search works best with 3-5 terms
 
-Reply with ONLY a JSON array of 5 query strings, nothing else:
-["query1", "query2", "query3", "query4", "query5"]"""
+Generate between 5 and 15 queries depending on how many distinct roles are in the JD.
+
+Reply with ONLY a JSON array of query strings:
+["query1", "query2", ...]"""
 
     try:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=500,
+            max_tokens=1000,
             temperature=0.7,
         )
         raw = resp.choices[0].message.content.strip()
         queries = json.loads(raw[raw.find("["):raw.rfind("]")+1])
-        return queries[:5]
+        # Validate: reject any query longer than 200 chars (safety net)
+        valid = [q for q in queries if len(q) < 200 and "type:user" in q]
+        return valid[:15]
     except Exception:
-        # Fallback: just return empty list
         return []
 
 # ─────────────────────────────────────────────
@@ -1438,19 +1473,36 @@ if search_mode == "🔍 Search":
             st.error("Missing API keys — add them to `~/n5h/.env`")
             st.stop()
 
+        # Auto-detect: if Role/Keywords is very long (>200 chars), treat it as a JD
+        if len(role_query.strip()) > 200:
+            st.info("📋 Detected long text in Role/Keywords — treating as Job Description")
+            if not job_description.strip():
+                job_description = role_query.strip()
+            else:
+                job_description = role_query.strip() + "\n\n" + job_description
+            role_query = ""  # Clear — AI will extract keywords from JD
+
         # If no role keywords but JD is provided, extract keywords from JD
         if not role_query.strip() and job_description.strip():
-            with st.spinner("🤖 Extracting search keywords from job description…"):
-                extracted = extract_search_keywords(job_description)
-            if extracted:
-                role_query = extracted
-                st.info(f"🔍 Searching for: **{extracted}** (extracted from JD)")
+            with st.spinner("🤖 Analyzing job description — extracting roles & keywords…"):
+                # First, identify all roles in the JD
+                roles_found = extract_roles_from_jd(job_description)
+                if roles_found:
+                    role_titles = [r.get("title", "") for r in roles_found if r.get("title")]
+                    st.info(f"🎯 Found **{len(roles_found)} role{'s' if len(roles_found) > 1 else ''}** in JD: {', '.join(role_titles)}")
+                    # Use the first role's search terms as the primary query for scoring
+                    role_query = roles_found[0].get("search_terms", "") or roles_found[0].get("title", "")
+                else:
+                    extracted = extract_search_keywords(job_description)
+                    if extracted:
+                        role_query = extracted
+                        st.info(f"🔍 Searching for: **{extracted}** (extracted from JD)")
 
         if not role_query.strip() and not job_description.strip():
             st.warning("Add at least one filter or paste a job description.")
             st.stop()
 
-        # ── Multi-query strategy: generate 5 queries via AI ──
+        # ── Multi-query strategy: generate queries via AI (multi-role aware) ──
         with st.spinner("🤖 Generating search queries…"):
             ai_queries = generate_search_queries(
                 role_query, location_query, company_query, seniority, job_description
@@ -1478,7 +1530,7 @@ if search_mode == "🔍 Search":
 
         with st.spinner(f"Searching GitHub with {len(ai_queries)} queries…"):
             query_errors = []
-            with ThreadPoolExecutor(max_workers=5) as executor:
+            with ThreadPoolExecutor(max_workers=min(15, len(ai_queries))) as executor:
                 futures = {executor.submit(_run_query, q): q for q in ai_queries}
                 for future in as_completed(futures):
                     users_batch, err = future.result()

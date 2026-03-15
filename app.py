@@ -149,8 +149,8 @@ def get_user_profile_cached(username):
     profile = _fetch_user_profile(username)
     if profile:
         cache[username] = {"ts": time.time(), "data": profile}
-        if len(cache) > 500:
-            for k in sorted(cache, key=lambda k: cache[k].get("ts", 0))[:100]:
+        if len(cache) > 2000:
+            for k in sorted(cache, key=lambda k: cache[k].get("ts", 0))[:500]:
                 del cache[k]
         _save_cache(cache)
     return profile
@@ -550,7 +550,7 @@ def search_users_direct(query, max_results=30):
             break
         if len(all_items) >= max_results:
             break
-        time.sleep(0.15)           # rate-limit courtesy
+        time.sleep(0.05)           # minimal rate-limit courtesy
     return all_items[:max_results], None
 
 def search_repos(query, max_repos=5):
@@ -1215,7 +1215,7 @@ if search_mode == "👤 User Search":
     with r1a:
         role_query = st.text_input("Role / Keywords", placeholder='e.g. "machine learning" OR "full stack" OR "react"')
     with r1b:
-        max_candidates = st.selectbox("Candidates", [30, 60, 100, 150], index=0)
+        max_candidates = st.selectbox("Candidates", [50, 100, 250, 500, 1000], index=0)
 
     r2a, r2b, r2c, r2d = st.columns([2, 2, 1, 1])
     with r2a:
@@ -1298,9 +1298,9 @@ if search_mode == "👤 User Search":
         has_company = bool(company_query.strip())
         # Only over-fetch if company post-filter is active
         if has_company:
-            fetch_pool = min(max_candidates * 3, 300)
+            fetch_pool = min(max_candidates * 3, 1000)  # GitHub Search caps at 1000
         else:
-            fetch_pool = max_candidates
+            fetch_pool = min(max_candidates, 1000)
 
         with st.spinner("Searching GitHub users…"):
             users, api_err = search_users_direct(final_query, fetch_pool)
@@ -1311,7 +1311,7 @@ if search_mode == "👤 User Search":
             # Fallback: if location query returned too few, broaden search
             if has_location and len(users) < max_candidates:
                 broad_query = build_user_query(include_location=False)
-                broad_pool = min(max_candidates * 3, 300)
+                broad_pool = min(max_candidates * 3, 1000)
                 broad_users, _ = search_users_direct(broad_query, broad_pool)
                 seen = {u["login"] for u in users}
                 for u in broad_users:
@@ -1323,8 +1323,8 @@ if search_mode == "👤 User Search":
             st.warning("No users found. Try broader filters.")
             st.stop()
 
-        # ── Parallel profile fetching (10 threads) — ~10× faster ──
-        st.markdown(f"### Fetching {len(users)} profiles…")
+        # ── Parallel profile fetching (25 threads) — blazing fast ──
+        st.markdown(f"### ⚡ Fetching {len(users)} profiles…")
         prog = st.progress(0)
         cache = _load_cache()  # Load cache ONCE
 
@@ -1354,7 +1354,7 @@ if search_mode == "👤 User Search":
 
         candidates = []
         done = 0
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        with ThreadPoolExecutor(max_workers=25) as executor:
             futures = {executor.submit(_fetch_one, u): u for u in users}
             for future in as_completed(futures):
                 done += 1
@@ -1399,8 +1399,28 @@ if search_mode == "👤 User Search":
 
         score_label = role_query or ", ".join(sel_languages) or "the role"
         jd_text = job_description if 'job_description' in dir() else ""
-        st.markdown(f"### Scoring {len(candidates)} candidates in one batch…")
-        scores, score_err = score_candidates_batch(candidates, score_label, jd_text)
+
+        # Batch scoring — split into chunks for large candidate sets
+        SCORE_BATCH = 50
+        if len(candidates) <= SCORE_BATCH:
+            st.markdown(f"### 🤖 Scoring {len(candidates)} candidates…")
+            scores, score_err = score_candidates_batch(candidates, score_label, jd_text)
+        else:
+            st.markdown(f"### 🤖 Scoring {len(candidates)} candidates in batches of {SCORE_BATCH}…")
+            score_prog = st.progress(0)
+            scores, score_err = {}, None
+            for batch_start in range(0, len(candidates), SCORE_BATCH):
+                batch = candidates[batch_start:batch_start + SCORE_BATCH]
+                batch_scores, err = score_candidates_batch(batch, score_label, jd_text)
+                if err:
+                    score_err = err
+                    if err == "quota":
+                        break
+                for local_i, val in batch_scores.items():
+                    scores[batch_start + local_i] = val
+                score_prog.progress(min(1.0, (batch_start + SCORE_BATCH) / len(candidates)))
+            score_prog.empty()
+
         if score_err == "quota":
             st.warning("⚠️ OpenAI quota exceeded — candidates shown unscored.")
         elif score_err:
@@ -1424,7 +1444,7 @@ elif search_mode == "📁 Repo Search":
             placeholder="e.g. Senior ML Engineer specialising in PyTorch and CUDA",
         )
     with col2:
-        max_candidates = st.selectbox("Candidates", [30, 60, 100], index=0)
+        max_candidates = st.selectbox("Candidates", [50, 100, 250, 500, 1000], index=0)
 
     with st.expander("📋 Paste Job Description / 1-Pager (optional — improves AI scoring)", expanded=False):
         job_description = st.text_area(
@@ -1453,7 +1473,9 @@ elif search_mode == "📁 Repo Search":
             st.stop()
 
         with st.spinner("Searching GitHub for the most relevant repositories…"):
-            repos, api_err = search_repos(role_query, max_repos=4)
+            # More repos for larger candidate counts
+            n_repos = min(10, max(4, max_candidates // 50))
+            repos, api_err = search_repos(role_query, max_repos=n_repos)
         if api_err:
             st.error(api_err)
             st.stop()
@@ -1471,14 +1493,16 @@ elif search_mode == "📁 Repo Search":
         st.markdown("### Finding top contributors…")
         prog = st.progress(0)
         all_contributors, seen = [], set()
-        per_repo = max(5, max_candidates // len(repos) + 3)
-        for i, repo in enumerate(repos):
-            for c in get_contributors(repo["owner"]["login"], repo["name"], per_repo):
+        # More repos for large candidate counts
+        max_repos_search = min(10, max(4, max_candidates // 50))
+        per_repo = max(10, max_candidates // max_repos_search + 5)
+        for i, repo in enumerate(repos[:max_repos_search]):
+            for c in get_contributors(repo["owner"]["login"], repo["name"], min(per_repo, 100)):
                 if c.get("login") not in seen and c.get("type") == "User":
                     seen.add(c["login"])
                     all_contributors.append(c)
-            prog.progress((i + 1) / len(repos))
-            time.sleep(0.3)
+            prog.progress((i + 1) / len(repos[:max_repos_search]))
+            time.sleep(0.05)
         prog.empty()
         all_contributors = all_contributors[:max_candidates]
 
@@ -1486,32 +1510,69 @@ elif search_mode == "📁 Repo Search":
             st.warning("No contributors found.")
             st.stop()
 
-        st.markdown("### Fetching profiles…")
+        # ── Parallel profile fetching (25 threads) — blazing fast ──
+        st.markdown(f"### ⚡ Fetching {len(all_contributors)} profiles…")
         fetch_prog = st.progress(0)
-        candidates = []
-        for i, contributor in enumerate(all_contributors):
+        cache = _load_cache()
+
+        def _fetch_one_contributor(contributor):
             username = contributor["login"]
-            profile  = get_user_profile_cached(username)
+            entry = cache.get(username)
+            if entry and time.time() - entry.get("ts", 0) < CACHE_TTL:
+                profile = entry["data"]
+            else:
+                profile = _fetch_user_profile(username)
+                if profile:
+                    cache[username] = {"ts": time.time(), "data": profile}
             if not profile:
-                fetch_prog.progress((i + 1) / len(all_contributors))
-                continue
+                return None
             user_repos = get_user_repos(username)
-            languages  = get_user_languages(username)
-            candidates.append({
+            languages = get_user_languages(username, repos=user_repos)
+            return {
                 "contributor": contributor,
-                "profile":     profile,
-                "user_repos":  user_repos,
-                "languages":   languages,
-                "score":       None,
-                "reason":      "",
-            })
-            fetch_prog.progress((i + 1) / len(all_contributors))
-            time.sleep(0.15)
+                "profile": profile,
+                "user_repos": user_repos,
+                "languages": languages,
+                "score": None,
+                "reason": "",
+            }
+
+        candidates = []
+        done = 0
+        with ThreadPoolExecutor(max_workers=25) as executor:
+            futures = {executor.submit(_fetch_one_contributor, c): c for c in all_contributors}
+            for future in as_completed(futures):
+                done += 1
+                fetch_prog.progress(done / len(all_contributors))
+                result = future.result()
+                if result:
+                    candidates.append(result)
         fetch_prog.empty()
+        _save_cache(cache)
 
         jd_text = job_description if 'job_description' in dir() else ""
-        st.markdown(f"### Scoring {len(candidates)} candidates in one batch…")
-        scores, score_err = score_candidates_batch(candidates, role_query, jd_text)
+
+        # Batch scoring — split into chunks for large candidate sets
+        SCORE_BATCH = 50
+        if len(candidates) <= SCORE_BATCH:
+            st.markdown(f"### 🤖 Scoring {len(candidates)} candidates…")
+            scores, score_err = score_candidates_batch(candidates, role_query, jd_text)
+        else:
+            st.markdown(f"### 🤖 Scoring {len(candidates)} candidates in batches of {SCORE_BATCH}…")
+            score_prog = st.progress(0)
+            scores, score_err = {}, None
+            for batch_start in range(0, len(candidates), SCORE_BATCH):
+                batch = candidates[batch_start:batch_start + SCORE_BATCH]
+                batch_scores, err = score_candidates_batch(batch, role_query, jd_text)
+                if err:
+                    score_err = err
+                    if err == "quota":
+                        break
+                for local_i, val in batch_scores.items():
+                    scores[batch_start + local_i] = val
+                score_prog.progress(min(1.0, (batch_start + SCORE_BATCH) / len(candidates)))
+            score_prog.empty()
+
         if score_err == "quota":
             st.warning("⚠️ OpenAI quota exceeded — candidates shown unscored.")
         elif score_err:

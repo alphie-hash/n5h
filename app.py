@@ -1720,6 +1720,21 @@ elif search_mode == "📇 My Network":
     else:
         st.markdown(f"**{len(all_connections):,} connections loaded**")
 
+        # ── Job Description input for network scoring ──
+        net_jd = st.text_area(
+            "📋 Paste a Job Description to score your network against",
+            height=150, key="net_jd",
+            placeholder="Paste a JD or 1-pager here. N5H will analyse each connection and tell you which role they fit and why.",
+        )
+        net_jd_file = st.file_uploader("Or upload a PDF / TXT", type=["pdf", "txt"], key="net_jd_file")
+        if net_jd_file:
+            if net_jd_file.name.lower().endswith(".pdf"):
+                extracted = extract_text_from_pdf(net_jd_file.read())
+                if extracted:
+                    net_jd = extracted
+            else:
+                net_jd = net_jd_file.read().decode("utf-8", errors="ignore")
+
         # Filters row 1 — same layout as User Search
         nc1, nc2, nc3 = st.columns([3, 1, 1])
         with nc1:
@@ -1740,7 +1755,7 @@ elif search_mode == "📇 My Network":
         with nc6:
             net_title = st.text_input("Job Title", placeholder="e.g. Head of Engineering", key="net_title")
         with nc7:
-            net_sort = st.selectbox("Sort", ["Tier", "Name", "Company", "Title"])
+            net_sort = st.selectbox("Sort", ["Score", "Tier", "Name", "Company", "Title"])
 
         search_net = st.button("🔍 Search Network", type="primary", use_container_width=True)
 
@@ -1751,9 +1766,78 @@ elif search_mode == "📇 My Network":
         if net_rel != "All":
             results = [c for c in results if c.get("relationship", "").upper() == net_rel.upper()]
 
+        # ── AI scoring against JD for network connections ──
+        net_scores_key = "net_jd_scores"
+        if search_net and net_jd.strip() and OPENAI_KEY_OK and results:
+            with st.spinner(f"🤖 Scoring {min(len(results), 200)} connections against JD…"):
+                from openai import OpenAI
+                client = OpenAI(api_key=OPENAI_API_KEY)
+                net_scores = {}
+                # Score in batches of 30
+                batch_size = 30
+                to_score = results[:200]  # cap at 200
+                for batch_start in range(0, len(to_score), batch_size):
+                    batch = to_score[batch_start:batch_start + batch_size]
+                    lines = []
+                    for i, c in enumerate(batch):
+                        global_i = batch_start + i
+                        name = c.get("name", "Unknown")
+                        title = c.get("title", "N/A")
+                        company = c.get("company", "N/A")
+                        location = c.get("location", "N/A")
+                        category = c.get("category", "N/A")
+                        lines.append(
+                            f"[{global_i}] {name} | title:{title} | company:{company} | "
+                            f"location:{location} | category:{category}"
+                        )
+                    prompt = (
+                        f"FULL JOB DESCRIPTION / 1-PAGER:\n{net_jd.strip()[:4000]}\n\n"
+                        "Score each person 0.0-10.0 based on how well they match ANY of the roles in the job description above.\n"
+                        "A candidate only needs to be a strong fit for ONE of the listed roles to score highly.\n"
+                        "Criteria: job title relevance, company relevance, domain alignment.\n"
+                        "In the conclusion, specify WHICH role(s) they best fit and WHY their background connects.\n\n"
+                        + "\n".join(lines)
+                        + '\n\nReply ONLY with a JSON array in the same order:\n'
+                        '[{"i":0,"score":7.5,"reason":"one sentence max 12 words",'
+                        '"conclusion":"2-3 sentence analysis of how this person connects to the role. Specify which role they fit.","role":"Best fitting role title"},...]'
+                    )
+                    try:
+                        resp = client.chat.completions.create(
+                            model="gpt-4o-mini",
+                            messages=[{"role": "user", "content": prompt}],
+                            max_tokens=max(200, len(batch) * 100),
+                            temperature=0.2,
+                        )
+                        raw = resp.choices[0].message.content.strip()
+                        data = json.loads(raw[raw.find("["):raw.rfind("]") + 1])
+                        for item in data:
+                            net_scores[item["i"]] = {
+                                "score": round(float(item["score"]), 1),
+                                "reason": item.get("reason", ""),
+                                "conclusion": item.get("conclusion", ""),
+                                "role": item.get("role", ""),
+                            }
+                    except Exception:
+                        pass
+                st.session_state[net_scores_key] = net_scores
+        elif search_net and not net_jd.strip():
+            # Clear scores if searching without JD
+            st.session_state.pop(net_scores_key, None)
+
+        # Attach scores to results for sorting
+        net_scores = st.session_state.get(net_scores_key, {})
+        for i, c in enumerate(results):
+            if i in net_scores:
+                c["_jd_score"] = net_scores[i].get("score", 0)
+                c["_jd_reason"] = net_scores[i].get("reason", "")
+                c["_jd_conclusion"] = net_scores[i].get("conclusion", "")
+                c["_jd_role"] = net_scores[i].get("role", "")
+
         # Sort
         tier_order = {"WORLD-CLASS": 0, "STRONG": 1, "MAYBE": 2, "": 3}
-        if net_sort == "Tier":
+        if net_sort == "Score":
+            results = sorted(results, key=lambda c: c.get("_jd_score", 0), reverse=True)
+        elif net_sort == "Tier":
             results = sorted(results, key=lambda c: tier_order.get(c.get("tier", "").upper(), 3))
         elif net_sort == "Company":
             results = sorted(results, key=lambda c: c.get("company", "").lower())
@@ -1771,12 +1855,14 @@ elif search_mode == "📇 My Network":
             conn_csv = io.StringIO()
             writer = csv.writer(conn_csv)
             writer.writerow(["Name", "Email", "Phone", "Location", "Job Title", "Company",
-                             "LinkedIn", "Tier", "Relationship", "Pipeline", "Owner", "Connected"])
+                             "LinkedIn", "Tier", "Relationship", "Pipeline", "Owner", "Connected",
+                             "JD Score", "Best Fit Role", "JD Conclusion"])
             for c in results:
                 writer.writerow([c.get("name",""), c.get("email",""), c.get("phone",""),
                                  c.get("location",""), c.get("title",""), c.get("company",""),
                                  c.get("linkedin_url",""), c.get("tier",""), c.get("relationship",""),
-                                 c.get("pipeline",""), c.get("owner",""), c.get("connected","")])
+                                 c.get("pipeline",""), c.get("owner",""), c.get("connected",""),
+                                 c.get("_jd_score",""), c.get("_jd_role",""), c.get("_jd_conclusion","")])
             st.download_button("⬇️ Export CSV", conn_csv.getvalue().encode("utf-8"),
                                "n5h_connections.csv", "text/csv", use_container_width=True)
         st.divider()
@@ -1857,6 +1943,17 @@ elif search_mode == "📇 My Network":
                             'border:1px solid #2a2a3e;text-align:center;min-width:72px;">—</div>',
                             unsafe_allow_html=True)
 
+                    # JD Score badge (if scored against a JD)
+                    jd_score = conn.get("_jd_score")
+                    if jd_score is not None and jd_score > 0:
+                        s_color = "#22c55e" if jd_score >= 7 else "#60a5fa" if jd_score >= 5 else "#f59e0b" if jd_score >= 3 else "#ef4444"
+                        st.markdown(
+                            f'<div style="display:inline-block;background:{s_color}18;color:{s_color};'
+                            f'font-size:1.1rem;font-weight:800;padding:6px 12px;border-radius:10px;'
+                            f'border:1px solid {s_color}40;text-align:center;min-width:52px;margin-top:4px;">'
+                            f'{jd_score}<span style="font-size:0.55rem;opacity:0.7;"> /10</span></div>',
+                            unsafe_allow_html=True)
+
                     # Relationship badge
                     rel = (conn.get("relationship") or "").upper()
                     rel_colors = {"WARM": ("#f97316", "rgba(249,115,22,0.08)"),
@@ -1915,6 +2012,22 @@ elif search_mode == "📇 My Network":
                     if conn.get("category"):
                         st.markdown(f"**Category:** `{conn['category']}`")
 
+                    # JD fit conclusion (from AI scoring)
+                    jd_role = conn.get("_jd_role", "")
+                    jd_conclusion = conn.get("_jd_conclusion", "")
+                    if jd_role:
+                        st.markdown(
+                            f'<span style="background:rgba(96,165,250,0.12);color:#60a5fa;font-size:0.72rem;'
+                            f'font-weight:700;padding:3px 10px;border-radius:20px;border:1px solid rgba(96,165,250,0.3);'
+                            f'letter-spacing:0.03em;">🎯 Best fit: {jd_role}</span>',
+                            unsafe_allow_html=True)
+                    if jd_conclusion:
+                        st.markdown(
+                            f'<div style="font-size:0.75rem;color:#9ca3af;line-height:1.4;'
+                            f'margin:6px 0;padding:6px 8px;background:rgba(255,255,255,0.03);'
+                            f'border-radius:8px;border-left:2px solid rgba(96,165,250,0.3);">'
+                            f'{jd_conclusion}</div>', unsafe_allow_html=True)
+
                 with col_action:
                     # Project + Pipeline selector
                     proj_data = load_projects()
@@ -1959,17 +2072,26 @@ elif search_mode == "📇 My Network":
                                 client = OpenAI(api_key=OPENAI_API_KEY)
                                 c_name = conn.get('name', 'there')
                                 c_first = c_name.split()[0] if ' ' in c_name else c_name
+                                # Include JD context if available
+                                jd_context = ""
+                                if conn.get("_jd_role"):
+                                    jd_context = f"TARGET ROLE: {conn['_jd_role']}\n"
+                                if conn.get("_jd_conclusion"):
+                                    jd_context += f"FIT ANALYSIS: {conn['_jd_conclusion']}\n"
+                                if net_jd.strip():
+                                    jd_context += f"JOB DESCRIPTION SUMMARY: {net_jd.strip()[:500]}\n"
                                 prompt = (
                                     f"You are Alphie, an intern at Number Five House (N5H), drafting a cold outreach email. "
                                     f"You work for Lucas Partington who leads recruiting at N5H. N5H builds teams for world-class tech ventures.\n\n"
                                     f"CANDIDATE: {c_name}\n"
-                                    f"Role: {conn.get('title', 'N/A')} at {conn.get('company', 'N/A')}\n"
+                                    f"Current Role: {conn.get('title', 'N/A')} at {conn.get('company', 'N/A')}\n"
                                     f"Location: {conn.get('location', 'N/A')}\n"
-                                    f"Relationship: {conn.get('relationship', 'unknown')}\n\n"
+                                    f"Relationship: {conn.get('relationship', 'unknown')}\n"
+                                    f"{jd_context}\n"
                                     f"FORMULA:\n"
                                     f"1. Open with: 'Hi {c_first},' then 'My name is Alphie. I'm an intern working for Lucas Partington at Number Five House (N5H). We build teams for world-class tech ventures.'\n"
                                     f"2. Reference something SPECIFIC about their role/company as a golden nugget — show you researched them.\n"
-                                    f"3. Pitch the opportunity connected to their background.\n"
+                                    f"3. Connect their background to the specific opportunity/role you're pitching them for.\n"
                                     f"4. End with: 'Lucas Partington would love 15 mins to discuss. Book time w/ Lucas or WhatsApp: +14155199582.\\n\\nThanks,\\nAlphie'\n\n"
                                     f"RULES: Never use 'founding crew' or 'zero-to-one leader'. Use 'core crew' and 'ground-up engineering leader' instead. "
                                     f"Tone: approachable, professional, intern-like warmth. Under 150 words. No placeholders."

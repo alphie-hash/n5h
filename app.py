@@ -78,12 +78,13 @@ POPULAR_LANGUAGES = [
     "R", "Julia", "Solidity", "Dart", "Elixir", "Haskell", "Shell",
 ]
 
-PIPELINE_STAGES = ["New", "Contacted", "Replied", "Hired", "Archived"]
+PIPELINE_STAGES = ["New", "Contacted", "Replied", "Interview", "Hired", "Archived"]
 
 STAGE_STYLE = {
     "New":       ("#9ca3af", "rgba(156,163,175,0.08)"),
     "Contacted": ("#60a5fa", "rgba(96,165,250,0.08)"),
     "Replied":   ("#a78bfa", "rgba(167,139,250,0.08)"),
+    "Interview": ("#f59e0b", "rgba(245,158,11,0.08)"),
     "Hired":     ("#4ade80", "rgba(74,222,128,0.08)"),
     "Archived":  ("#f87171", "rgba(248,113,113,0.08)"),
 }
@@ -541,6 +542,15 @@ PREMIUM_CSS = """
   [data-testid="stImage"] img { border-radius: 50% !important; border: 2px solid rgba(255,255,255,0.15) !important; }
   [data-testid="stDownloadButton"] > button { background: rgba(255,255,255,0.05) !important; border: 1px solid rgba(255,255,255,0.12) !important; border-radius: 8px !important; color: #d0d0d0 !important; font-weight: 600 !important; width: 100%; }
   [data-testid="stDownloadButton"] > button:hover { background: rgba(255,255,255,0.09) !important; border-color: rgba(255,255,255,0.3) !important; }
+  /* Mobile responsive — stack columns vertically */
+  @media (max-width: 768px) {
+    [data-testid="stHorizontalBlock"] { flex-direction: column !important; }
+    [data-testid="stHorizontalBlock"] > div { width: 100% !important; flex: none !important; }
+  }
+  /* Clean sidebar project buttons */
+  [data-testid="stSidebar"] [data-testid="stButton"] > button {
+    text-align: left !important; padding-left: 16px !important;
+  }
 </style>
 """
 
@@ -1155,29 +1165,29 @@ def render_candidate(c, idx, role_query, pipeline, connections=None, project_nam
                     update_pipeline(username, new_stage, project_name=_pname)
                     st.rerun()
                 # Remove from project
-                if st.button("❌ Remove from project", key=f"rmpipe_{_pname}_{username}_{idx}", use_container_width=True):
+                if st.button("❌ Remove", key=f"rmpipe_{_pname}_{username}_{idx}", use_container_width=True):
                     update_pipeline(username, "New", project_name=_pname)
                     st.toast(f"Removed from {_pname}", icon="🗑️")
                     st.rerun()
             else:
-                # NOT in project — show "Add to project" button
-                add_stage = st.selectbox("Add as", PIPELINE_STAGES[1:], key=f"addstage_{_pname}_{username}_{idx}")
+                # NOT in project — ONE-CLICK add, defaults to "Contacted"
                 if st.button(f"➕ Add to {_pname}", key=f"addbtn_{_pname}_{username}_{idx}",
                              type="primary", use_container_width=True):
-                    update_pipeline(username, add_stage, project_name=_pname)
+                    update_pipeline(username, "Contacted", project_name=_pname)
                     st.toast(f"Added to {_pname}!", icon="✅")
                     st.rerun()
 
-            # Add to OTHER projects
+            # Add to other projects — tucked in expander (Change 5)
             proj_data = load_projects()
             proj_names = list(proj_data.get("projects", {}).keys())
             other_projects = [p for p in proj_names if p != _pname]
             if other_projects:
-                add_proj = st.selectbox("➕ Add to another project", ["—"] + other_projects, key=f"copyproj_{_pname}_{username}_{idx}")
-                if add_proj != "—":
-                    if st.button(f"Add to {add_proj}", key=f"copybtn_{_pname}_{username}_{idx}", use_container_width=True):
-                        update_pipeline(username, "Contacted", project_name=add_proj)
-                        st.toast(f"Added to {add_proj}", icon="📁")
+                with st.expander("More…", expanded=False):
+                    add_proj = st.selectbox("Add to project", ["—"] + other_projects, key=f"copyproj_{_pname}_{username}_{idx}")
+                    if add_proj != "—":
+                        if st.button(f"Add to {add_proj}", key=f"copybtn_{_pname}_{username}_{idx}", use_container_width=True):
+                            update_pipeline(username, "Contacted", project_name=add_proj)
+                            st.toast(f"Added to {add_proj}", icon="📁")
                         st.rerun()
 
             # LinkedIn
@@ -1279,7 +1289,12 @@ if not st.session_state["authenticated"]:
 if "notes" not in st.session_state:
     st.session_state["notes"] = load_notes()
 if "current_project" not in st.session_state:
-    st.session_state["current_project"] = None
+    _init_proj = load_projects()
+    _last_active = _init_proj.get("_active")
+    if _last_active and _last_active in _init_proj.get("projects", {}):
+        st.session_state["current_project"] = _last_active
+    else:
+        st.session_state["current_project"] = None
 
 # ─────────────────────────────────────────────
 # Helper: project-scoped session key
@@ -1293,39 +1308,22 @@ def _pk(key):
 # SIDEBAR — always visible
 # ─────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### ⚙️ Status")
-    if GITHUB_TOKEN_OK:
-        st.success("✅ GitHub connected")
-    else:
-        st.error("❌ GitHub token missing")
-    if OPENAI_KEY_OK:
-        st.success("✅ OpenAI connected")
-    else:
-        st.error("❌ OpenAI key missing")
-    if PROXYCURL_OK:
-        st.success("✅ Proxycurl connected")
-    else:
-        st.caption("ℹ️ Proxycurl not configured (optional)")
-    st.divider()
-
-    # ── Project list in sidebar ──
+    # ── Project list — clean, minimal ──
     projects_data = load_projects()
     project_names = list(projects_data.get("projects", {}).keys())
 
-    st.markdown("### 📁 Projects")
+    st.markdown("### Projects")
 
     # Home button
-    if st.button("🏠 All Projects", use_container_width=True,
+    if st.button("🏠 Home", use_container_width=True,
                  type="primary" if st.session_state["current_project"] is None else "secondary"):
         st.session_state["current_project"] = None
         st.rerun()
 
-    # List each project as a clickable sidebar button
+    # List each project — clean names, active one highlighted
     for pn in project_names:
-        pc = projects_data["projects"][pn]
-        p_count = len(pc.get("candidates", {}))
         is_active = (pn == st.session_state["current_project"])
-        btn_label = f"{'📂' if is_active else '📁'} {pn} ({p_count})"
+        btn_label = f"{'▸ ' if is_active else '   '}{pn}"
         if st.button(btn_label, key=f"sb_proj_{pn}", use_container_width=True,
                      type="primary" if is_active else "secondary"):
             st.session_state["current_project"] = pn
@@ -1343,29 +1341,53 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Pipeline summary for active project ──
-    if st.session_state["current_project"]:
-        _ap = st.session_state["current_project"]
-        _ap_data = projects_data.get("projects", {}).get(_ap, {})
-        _ap_cands = _ap_data.get("candidates", {})
-        if _ap_cands:
-            st.markdown(f"#### 📊 {_ap} Pipeline")
-            _stage_counts = {}
-            for _v in _ap_cands.values():
-                _s = _v.get("stage", "New")
-                _stage_counts[_s] = _stage_counts.get(_s, 0) + 1
-            st.caption(f"{len(_ap_cands)} candidate{'s' if len(_ap_cands) != 1 else ''}")
-            for _s in PIPELINE_STAGES[1:]:
-                _cnt = _stage_counts.get(_s, 0)
-                if _cnt:
-                    _col, _ = STAGE_STYLE[_s]
-                    st.markdown(
-                        f'<div style="display:flex;justify-content:space-between;padding:4px 0;'
-                        f'color:{_col};font-size:0.85rem;"><span>{_s}</span><strong>{_cnt}</strong></div>',
-                        unsafe_allow_html=True)
-        st.divider()
+    # ── Connections upload ──
+    st.markdown("### Network")
+    existing_connections = load_connections()
+    if existing_connections:
+        st.caption(f"{len(existing_connections):,} connections loaded")
+    uploaded_files = st.file_uploader("Upload CSVs", type=["csv"], label_visibility="collapsed", accept_multiple_files=True)
+    if uploaded_files:
+        existing_set = {(c["name"].lower(), c["email"].lower()) for c in existing_connections}
+        total_added = 0
+        for uploaded in uploaded_files:
+            new_connections = parse_connections_csv_bytes(uploaded.read())
+            for c in new_connections:
+                key = (c["name"].lower(), c["email"].lower())
+                if key not in existing_set:
+                    existing_connections.append(c)
+                    existing_set.add(key)
+                    total_added += 1
+        if total_added > 0:
+            save_connections(existing_connections)
+            st.toast(f"Added {total_added:,} new connections ({len(existing_connections):,} total)", icon="📇")
+            st.rerun()
+        elif uploaded_files:
+            st.info("All connections already loaded (0 new).")
 
-    # ── Post-search filters (only when search results exist) ──
+    st.divider()
+
+    # ── Settings (collapsed) ──
+    with st.expander("⚙️ Settings", expanded=False):
+        if GITHUB_TOKEN_OK:
+            st.markdown("✅ GitHub")
+        else:
+            st.markdown("❌ GitHub token missing")
+        if OPENAI_KEY_OK:
+            st.markdown("✅ OpenAI")
+        else:
+            st.markdown("❌ OpenAI key missing")
+        if PROXYCURL_OK:
+            st.markdown("✅ Proxycurl")
+        else:
+            st.caption("Proxycurl not configured")
+        st.divider()
+        if existing_connections:
+            if st.button("🗑️ Clear all connections", use_container_width=True):
+                save_connections([])
+                st.rerun()
+
+    # ── Post-search filters (moved from prominent sidebar to here) ──
     _rk = _pk("results")
     filter_langs = []
     filter_location = ""
@@ -1398,34 +1420,6 @@ with st.sidebar:
             filter_min_score = st.slider("Min score", 0.0, 10.0, 0.0, 0.5)
         sort_by = st.selectbox("Sort by", ["Score", "Followers", "Contributions", "Account Age"])
         st.divider()
-
-    # ── Connections upload (always in sidebar) ──
-    st.markdown("### 📇 My Network")
-    existing_connections = load_connections()
-    if existing_connections:
-        st.markdown(f"**{len(existing_connections):,}** connections loaded")
-    uploaded_files = st.file_uploader("Upload CSVs", type=["csv"], label_visibility="collapsed", accept_multiple_files=True)
-    if uploaded_files:
-        existing_set = {(c["name"].lower(), c["email"].lower()) for c in existing_connections}
-        total_added = 0
-        for uploaded in uploaded_files:
-            new_connections = parse_connections_csv_bytes(uploaded.read())
-            for c in new_connections:
-                key = (c["name"].lower(), c["email"].lower())
-                if key not in existing_set:
-                    existing_connections.append(c)
-                    existing_set.add(key)
-                    total_added += 1
-        if total_added > 0:
-            save_connections(existing_connections)
-            st.toast(f"Added {total_added:,} new connections ({len(existing_connections):,} total)", icon="📇")
-            st.rerun()
-        elif uploaded_files:
-            st.info("All connections already loaded (0 new).")
-    if existing_connections:
-        if st.button("🗑️ Clear all connections", use_container_width=True):
-            save_connections([])
-            st.rerun()
 
 # ═════════════════════════════════════════════
 # MAIN CONTENT AREA
@@ -1474,54 +1468,52 @@ if st.session_state["current_project"] is None:
     project_names = list(projects_data.get("projects", {}).keys())
 
     if project_names:
-        st.markdown(f"### 📁 Your Projects ({len(project_names)})")
-        # Grid: 3 columns
-        cols = st.columns(3)
         for pi, pname in enumerate(project_names):
             pdata = projects_data["projects"][pname]
             p_count = len(pdata.get("candidates", {}))
             p_jd = pdata.get("job_description", "")
             p_created = pdata.get("created", "")
-            # Last activity
-            last_updated = "No activity"
-            cands = pdata.get("candidates", {})
-            if cands:
-                dates = [v.get("updated", "") for v in cands.values() if v.get("updated")]
-                if dates:
-                    last_updated = max(dates)
+            # Stage counts
+            _sc = {}
+            for _cv in pdata.get("candidates", {}).values():
+                _ss = _cv.get("stage", "New")
+                _sc[_ss] = _sc.get(_ss, 0) + 1
+            stage_pills = ""
+            for _sn in PIPELINE_STAGES[1:-1]:  # skip New and Archived
+                _cnt = _sc.get(_sn, 0)
+                if _cnt:
+                    _clr, _ = STAGE_STYLE[_sn]
+                    stage_pills += (
+                        f'<span style="background:{_clr}15;color:{_clr};font-size:0.65rem;'
+                        f'font-weight:600;padding:2px 8px;border-radius:12px;'
+                        f'border:1px solid {_clr}30;margin-right:4px;">'
+                        f'{_sn} {_cnt}</span>'
+                    )
+            jd_status = f'<span style="color:#22c55e;font-size:0.7rem;">📋 JD loaded</span>' if p_jd else '<span style="color:#6b7280;font-size:0.7rem;">No JD</span>'
 
-            with cols[pi % 3]:
-                with st.container():
+            with st.container():
+                _c1, _c2, _c3 = st.columns([4, 2, 1])
+                with _c1:
                     st.markdown(
-                        f'<h3 style="margin:0 0 4px 0;color:#f0f0f0;">📁 {pname}</h3>',
+                        f'<div style="margin:0;">'
+                        f'<span style="font-size:1.15rem;font-weight:700;color:#f0f0f0;">{pname}</span>'
+                        f'<span style="color:#60a5fa;font-size:0.8rem;font-weight:600;margin-left:10px;">'
+                        f'{p_count} candidates</span></div>'
+                        f'<div style="margin:4px 0;">{stage_pills}</div>'
+                        f'<div style="display:flex;gap:12px;align-items:center;margin-top:2px;">'
+                        f'{jd_status}'
+                        f'<span style="color:#4b5563;font-size:0.65rem;">{p_created}</span></div>',
                         unsafe_allow_html=True)
-                    st.markdown(
-                        f'<div style="display:flex;gap:16px;margin:8px 0;">'
-                        f'<span style="color:#60a5fa;font-size:0.85rem;font-weight:700;">{p_count} candidates</span>'
-                        f'<span style="color:#6b7280;font-size:0.85rem;">Created {p_created}</span></div>',
-                        unsafe_allow_html=True)
-                    if p_jd:
-                        jd_preview = p_jd[:120].replace("\n", " ") + ("…" if len(p_jd) > 120 else "")
-                        st.markdown(
-                            f'<div style="font-size:0.75rem;color:#9ca3af;padding:6px 8px;'
-                            f'background:rgba(255,255,255,0.03);border-radius:6px;margin:4px 0;">'
-                            f'📋 {jd_preview}</div>',
-                            unsafe_allow_html=True)
-                    else:
-                        st.caption("No JD attached")
-                    st.caption(f"Last activity: {last_updated}")
-
-                    bc1, bc2 = st.columns(2)
-                    with bc1:
-                        if st.button("📂 Open", key=f"home_open_{pi}", type="primary", use_container_width=True):
-                            st.session_state["current_project"] = pname
-                            set_active_project(pname)
+                with _c2:
+                    if st.button("Open", key=f"home_open_{pi}", type="primary", use_container_width=True):
+                        st.session_state["current_project"] = pname
+                        set_active_project(pname)
+                        st.rerun()
+                with _c3:
+                    if len(project_names) > 1:
+                        if st.button("🗑️", key=f"home_del_{pi}", use_container_width=True, help="Delete project"):
+                            delete_project(pname)
                             st.rerun()
-                    with bc2:
-                        if len(project_names) > 1:
-                            if st.button("🗑️ Delete", key=f"home_del_{pi}", use_container_width=True):
-                                delete_project(pname)
-                                st.rerun()
 
 else:
     # ─────────────────────────────────────────
@@ -1548,12 +1540,14 @@ else:
     with hdr2:
         st.title(f"📂 {_proj_name}")
     _proj_created = _proj.get("created", "")
-    st.caption(f"Created {_proj_created} · {len(_proj_pipeline)} candidates · JD: {len(_proj_jd):,} chars")
+    st.caption(f"Created {_proj_created} · {len(_proj_pipeline)} candidates")
 
-    # ── Edit JD ──
-    with st.expander("📋 View / Edit Job Description", expanded=False):
-        _edit_jd = st.text_area("Job Description", value=_proj_jd, height=200, key=f"edit_jd_{_proj_name}")
-        _edit_jd_file = st.file_uploader("Upload PDF/TXT to replace JD", type=["pdf", "txt"], key=f"edit_jd_file_{_proj_name}")
+    # ── Smart JD input — prominent when empty, collapsed when filled ──
+    if not _proj_jd.strip():
+        st.warning("⚠️ No job description yet — add one to enable AI-powered search and scoring.")
+        _edit_jd = st.text_area("📋 Paste your Job Description", height=180, key=f"edit_jd_{_proj_name}",
+                                placeholder="Paste the full JD, company brief, or 1-pager here…")
+        _edit_jd_file = st.file_uploader("Or upload PDF/TXT", type=["pdf", "txt"], key=f"edit_jd_file_{_proj_name}")
         if _edit_jd_file:
             if _edit_jd_file.name.lower().endswith(".pdf"):
                 _extracted = extract_text_from_pdf(_edit_jd_file.read())
@@ -1561,15 +1555,37 @@ else:
                     _edit_jd = _extracted
             else:
                 _edit_jd = _edit_jd_file.read().decode("utf-8", errors="ignore")
-        if st.button("💾 Save JD", key=f"save_jd_{_proj_name}", use_container_width=True):
-            update_project_jd(_proj_name, _edit_jd)
-            st.toast("Job description saved!", icon="📋")
-            st.rerun()
+        if st.button("💾 Save JD", key=f"save_jd_{_proj_name}", type="primary", use_container_width=True):
+            if _edit_jd.strip():
+                update_project_jd(_proj_name, _edit_jd)
+                st.toast("Job description saved!", icon="📋")
+                st.rerun()
+    else:
+        st.markdown(
+            f'<div style="font-size:0.8rem;color:#6b7280;padding:6px 10px;'
+            f'background:rgba(255,255,255,0.03);border-radius:8px;border-left:2px solid #22c55e40;">'
+            f'📋 JD loaded ({len(_proj_jd):,} chars) — '
+            f'{_proj_jd[:100].replace(chr(10)," ")}…</div>',
+            unsafe_allow_html=True)
+        with st.expander("✏️ Edit JD", expanded=False):
+            _edit_jd = st.text_area("Job Description", value=_proj_jd, height=200, key=f"edit_jd_{_proj_name}")
+            _edit_jd_file = st.file_uploader("Upload PDF/TXT to replace", type=["pdf", "txt"], key=f"edit_jd_file_{_proj_name}")
+            if _edit_jd_file:
+                if _edit_jd_file.name.lower().endswith(".pdf"):
+                    _extracted = extract_text_from_pdf(_edit_jd_file.read())
+                    if _extracted and not _extracted.startswith("[PDF"):
+                        _edit_jd = _extracted
+                else:
+                    _edit_jd = _edit_jd_file.read().decode("utf-8", errors="ignore")
+            if st.button("💾 Save JD", key=f"save_jd_{_proj_name}", use_container_width=True):
+                update_project_jd(_proj_name, _edit_jd)
+                st.toast("Job description saved!", icon="📋")
+                st.rerun()
 
     st.divider()
 
-    # ── Inner tabs: Search | My Network | Pipeline ──
-    ws_tab_search, ws_tab_network, ws_tab_pipeline = st.tabs(["🔍 Search", "📇 My Network", "📊 Pipeline"])
+    # ── Inner tabs: Search | Pipeline ── (Network merged into Search)
+    ws_tab_search, ws_tab_pipeline = st.tabs(["🔍 Search", "📊 Pipeline"])
 
     # ══════════════════════════════════════════
     # TAB: SEARCH (within project workspace)
@@ -1957,296 +1973,64 @@ else:
                             st.session_state[_rpk] += 1
                             st.rerun()
 
-    # ══════════════════════════════════════════
-    # TAB: MY NETWORK (within project workspace)
-    # ══════════════════════════════════════════
-    with ws_tab_network:
-        all_connections = load_connections()
-        if not all_connections:
-            st.info("📇 Upload a CSV in the sidebar to search your network.")
-        else:
-            st.markdown(f"**{len(all_connections):,} connections loaded**")
-            if _proj_jd:
-                st.info(f"📋 Scoring against **{_proj_name}** JD ({len(_proj_jd):,} chars)")
-            else:
-                st.warning("No JD attached — add one to score connections against it.")
-
-            # Filters
-            nc1, nc2, nc3 = st.columns([3, 1, 1])
-            with nc1:
-                net_query = st.text_input("Role / Keywords", placeholder='e.g. "engineering manager"', key=f"nq_{_proj_name}")
-            with nc2:
-                all_tiers = sorted({c.get("tier","") for c in all_connections if c.get("tier","")})
-                net_tier = st.selectbox("Tier", ["All"] + all_tiers, key=f"nt_{_proj_name}")
-            with nc3:
-                all_rels = sorted({c.get("relationship","") for c in all_connections if c.get("relationship","")})
-                net_rel = st.selectbox("Relationship", ["All"] + all_rels, key=f"nr_{_proj_name}")
-
-            nc4, nc5, nc6, nc7 = st.columns([2, 2, 2, 1])
-            with nc4:
-                net_location = st.text_input("Location", placeholder="e.g. Bay Area", key=f"nl_{_proj_name}")
-            with nc5:
-                net_company = st.text_input("Company", placeholder="e.g. Meta", key=f"nco_{_proj_name}")
-            with nc6:
-                net_title = st.text_input("Job Title", placeholder="e.g. Head of Engineering", key=f"njt_{_proj_name}")
-            with nc7:
-                net_sort = st.selectbox("Sort", ["Score", "Tier", "Name", "Company"], key=f"ns_{_proj_name}")
-
-            search_net = st.button("🔍 Search Network", type="primary", use_container_width=True, key=f"sn_{_proj_name}")
-
-            results = search_connections(all_connections, net_query, net_location, net_company, net_title)
-            if net_tier != "All":
-                results = [c for c in results if c.get("tier", "").upper() == net_tier.upper()]
-            if net_rel != "All":
-                results = [c for c in results if c.get("relationship", "").upper() == net_rel.upper()]
-
-            # AI scoring against project JD
-            _net_scores_key = f"net_jd_scores_{_proj_name}"
-            if search_net and _proj_jd.strip() and OPENAI_KEY_OK and results:
-                with st.spinner(f"🤖 Scoring {min(len(results), 200)} connections against {_proj_name} JD…"):
-                    from openai import OpenAI
-                    client = OpenAI(api_key=OPENAI_API_KEY)
-                    net_scores = {}
-                    batch_size = 30
-                    to_score = results[:200]
-                    for batch_start in range(0, len(to_score), batch_size):
-                        batch = to_score[batch_start:batch_start + batch_size]
-                        lines = []
-                        for i, c in enumerate(batch):
-                            global_i = batch_start + i
-                            lines.append(
-                                f"[{global_i}] {c.get('name', 'Unknown')} | title:{c.get('title', 'N/A')} | "
-                                f"company:{c.get('company', 'N/A')} | location:{c.get('location', 'N/A')} | "
-                                f"category:{c.get('category', 'N/A')}"
-                            )
-                        prompt = (
-                            f"FULL JOB DESCRIPTION / 1-PAGER:\n{_proj_jd.strip()[:4000]}\n\n"
-                            "Score each person 0.0-10.0 based on how well they match ANY role in the JD.\n"
-                            "Specify WHICH role(s) they best fit and WHY.\n\n"
-                            + "\n".join(lines)
-                            + '\n\nReply ONLY with a JSON array:\n'
-                            '[{"i":0,"score":7.5,"reason":"one sentence max 12 words",'
-                            '"conclusion":"2-3 sentence analysis.","role":"Best fitting role title"},...]'
-                        )
-                        try:
-                            resp = client.chat.completions.create(
-                                model="gpt-4o-mini",
-                                messages=[{"role": "user", "content": prompt}],
-                                max_tokens=max(200, len(batch) * 100),
-                                temperature=0.2,
-                            )
-                            raw = resp.choices[0].message.content.strip()
-                            data = json.loads(raw[raw.find("["):raw.rfind("]") + 1])
-                            for item in data:
-                                net_scores[item["i"]] = {
-                                    "score": round(float(item["score"]), 1),
-                                    "reason": item.get("reason", ""),
-                                    "conclusion": item.get("conclusion", ""),
-                                    "role": item.get("role", ""),
-                                }
-                        except Exception:
-                            pass
-                    st.session_state[_net_scores_key] = net_scores
-            elif search_net and not _proj_jd.strip():
-                st.session_state.pop(_net_scores_key, None)
-
-            # Attach scores
-            net_scores = st.session_state.get(_net_scores_key, {})
-            for i, c in enumerate(results):
-                if i in net_scores:
-                    c["_jd_score"] = net_scores[i].get("score", 0)
-                    c["_jd_reason"] = net_scores[i].get("reason", "")
-                    c["_jd_conclusion"] = net_scores[i].get("conclusion", "")
-                    c["_jd_role"] = net_scores[i].get("role", "")
-
-            # Sort
-            tier_order = {"WORLD-CLASS": 0, "STRONG": 1, "MAYBE": 2, "": 3}
-            if net_sort == "Score":
-                results = sorted(results, key=lambda c: c.get("_jd_score", 0), reverse=True)
-            elif net_sort == "Tier":
-                results = sorted(results, key=lambda c: tier_order.get(c.get("tier", "").upper(), 3))
-            elif net_sort == "Company":
-                results = sorted(results, key=lambda c: c.get("company", "").lower())
-            else:
-                results = sorted(results, key=lambda c: c.get("name", "").lower())
-
+        # ── Network Matches section (unified into Search tab) ──
+        _net_conns = load_connections()
+        if _net_conns and (role_query or job_description):
             st.divider()
-            res_col, csv_col = st.columns([4, 1])
-            with res_col:
-                st.success(f"**{len(results):,} connections** match your filters → Adding to **{_proj_name}**")
-            with csv_col:
-                conn_csv = io.StringIO()
-                writer = csv.writer(conn_csv)
-                writer.writerow(["Name", "Email", "Phone", "Location", "Title", "Company",
-                                 "LinkedIn", "Tier", "Relationship", "JD Score", "Best Fit Role", "Conclusion"])
-                for c in results:
-                    writer.writerow([c.get("name",""), c.get("email",""), c.get("phone",""),
-                                     c.get("location",""), c.get("title",""), c.get("company",""),
-                                     c.get("linkedin_url",""), c.get("tier",""), c.get("relationship",""),
-                                     c.get("_jd_score",""), c.get("_jd_role",""), c.get("_jd_conclusion","")])
-                st.download_button("⬇️ CSV", conn_csv.getvalue().encode("utf-8"),
-                                   f"n5h_{_proj_name}_network.csv", "text/csv", use_container_width=True)
-            st.divider()
-
-            # Render connection cards
-            pipeline = _proj_pipeline
-            page_size = 50
-            _npk = f"net_page_{_proj_name}"
-            total_pages = max(1, (len(results) + page_size - 1) // page_size)
-            if _npk not in st.session_state:
-                st.session_state[_npk] = 0
-            st.session_state[_npk] = min(st.session_state[_npk], total_pages - 1)
-            current_page = st.session_state[_npk]
-            start_idx = current_page * page_size
-            end_idx = min(start_idx + page_size, len(results))
-
-            if total_pages > 1:
-                pg1, pg2, pg3 = st.columns([1, 2, 1])
-                with pg1:
-                    if st.button("◀ Prev", disabled=current_page == 0, key=f"np_{_proj_name}", use_container_width=True):
-                        st.session_state[_npk] -= 1
-                        st.rerun()
-                with pg2:
-                    st.markdown(f"<div style='text-align:center;padding:8px;color:#aaa;'>"
-                               f"Page {current_page + 1} of {total_pages}</div>", unsafe_allow_html=True)
-                with pg3:
-                    if st.button("Next ▶", disabled=current_page >= total_pages - 1, key=f"nn_{_proj_name}", use_container_width=True):
-                        st.session_state[_npk] += 1
-                        st.rerun()
-
-            for idx, conn in enumerate(results[start_idx:end_idx], start=start_idx):
-                conn_key = f"conn_{conn.get('name','').lower().replace(' ','_')}"
-                stage = pipeline.get(conn_key, {}).get("stage", "New")
-
-                with st.container():
-                    col_badge, col_info, col_action = st.columns([1, 4, 2])
-
-                    with col_badge:
-                        # Tier badge
-                        tier = (conn.get("tier") or "").upper()
-                        if tier == "WORLD-CLASS":
+            st.markdown("### 📇 Network Matches")
+            st.caption("Connections from your uploaded CSVs that match this search")
+            _net_keyword = role_query or (_extra_input.strip()[:100] if _extra_input.strip() else "")
+            _net_results = search_connections(_net_conns, _net_keyword, location_query, company_query, "")
+            if _net_results:
+                st.success(f"**{len(_net_results[:20])} network matches** (showing top 20)")
+                _pipeline = _proj_pipeline
+                for _ni, _nc in enumerate(_net_results[:20]):
+                    _nck = f"conn_{_nc.get('name','').lower().replace(' ','_')}"
+                    _nstage = _pipeline.get(_nck, {}).get("stage", "New")
+                    with st.container():
+                        _nc1, _nc2, _nc3 = st.columns([1, 4, 1])
+                        with _nc1:
+                            tier = (_nc.get("tier") or "").upper()
+                            tier_colors = {"WORLD-CLASS": "#22c55e", "STRONG": "#60a5fa", "MAYBE": "#fbbf24"}
+                            _tc = tier_colors.get(tier, "#4b5563")
                             st.markdown(
-                                '<div style="display:inline-block;background:#22c55e18;color:#22c55e;'
-                                'font-size:0.85rem;font-weight:800;padding:10px 14px;border-radius:12px;'
-                                'border:1px solid #22c55e40;text-align:center;min-width:72px;line-height:1.2;">'
-                                'WC<br><span style="font-size:0.5rem;font-weight:500;opacity:0.7;">WORLD-CLASS</span></div>',
+                                f'<div style="color:{_tc};font-size:0.75rem;font-weight:700;'
+                                f'padding:6px;text-align:center;">{tier or "—"}</div>',
                                 unsafe_allow_html=True)
-                        elif tier == "STRONG":
-                            st.markdown(
-                                '<div style="display:inline-block;background:#60a5fa18;color:#60a5fa;'
-                                'font-size:0.85rem;font-weight:800;padding:10px 14px;border-radius:12px;'
-                                'border:1px solid #60a5fa40;text-align:center;min-width:72px;line-height:1.2;">'
-                                'STR<br><span style="font-size:0.5rem;font-weight:500;opacity:0.7;">STRONG</span></div>',
-                                unsafe_allow_html=True)
-                        elif tier == "MAYBE":
-                            st.markdown(
-                                '<div style="display:inline-block;background:#f59e0b18;color:#fbbf24;'
-                                'font-size:0.85rem;font-weight:800;padding:10px 14px;border-radius:12px;'
-                                'border:1px solid #f59e0b40;text-align:center;min-width:72px;line-height:1.2;">'
-                                'MBE<br><span style="font-size:0.5rem;font-weight:500;opacity:0.7;">MAYBE</span></div>',
-                                unsafe_allow_html=True)
-                        else:
-                            st.markdown(
-                                '<div style="display:inline-block;background:#1e1e2e;color:#4b5563;'
-                                'font-size:0.75rem;font-weight:600;padding:8px 14px;border-radius:12px;'
-                                'border:1px solid #2a2a3e;text-align:center;min-width:72px;">—</div>',
-                                unsafe_allow_html=True)
-
-                        # JD Score
-                        jd_score = conn.get("_jd_score")
-                        if jd_score is not None and jd_score > 0:
-                            s_color = "#22c55e" if jd_score >= 7 else "#60a5fa" if jd_score >= 5 else "#f59e0b" if jd_score >= 3 else "#ef4444"
-                            st.markdown(
-                                f'<div style="display:inline-block;background:{s_color}18;color:{s_color};'
-                                f'font-size:1.1rem;font-weight:800;padding:6px 12px;border-radius:10px;'
-                                f'border:1px solid {s_color}40;text-align:center;min-width:52px;margin-top:4px;">'
-                                f'{jd_score}<span style="font-size:0.55rem;opacity:0.7;"> /10</span></div>',
-                                unsafe_allow_html=True)
-
-                        st.markdown(pipeline_badge(stage), unsafe_allow_html=True)
-
-                    with col_info:
-                        name = conn.get("name", "Unknown")
-                        if conn.get("linkedin_url"):
-                            st.markdown(
-                                f'<h3 style="margin:0;"><a href="{conn["linkedin_url"]}" target="_blank" '
-                                f'style="color:#60a5fa;text-decoration:none;">{name} 🔗</a></h3>',
-                                unsafe_allow_html=True)
-                        else:
-                            st.markdown(f"### {name}")
-
-                        if conn.get("title"):
-                            st.caption(conn["title"])
-
-                        m1, m2, m3, m4 = st.columns(4)
-                        m1.metric("Company", conn.get("company") or "—")
-                        m2.metric("Location", conn.get("location") or "—")
-                        m3.metric("Pipeline", conn.get("pipeline") or "—")
-                        m4.metric("Connected", conn.get("connected") or "—")
-
-                        contact = []
-                        if conn.get("email"):
-                            contact.append(f"✉️ [{conn['email']}](mailto:{conn['email']})")
-                        if conn.get("phone"):
-                            contact.append(f"📞 {conn['phone']}")
-                        if conn.get("linkedin_url"):
-                            contact.append(f"🔗 [LinkedIn]({conn['linkedin_url']})")
-                        if contact:
-                            st.markdown("  ·  ".join(contact))
-
-                        # JD fit conclusion
-                        jd_role = conn.get("_jd_role", "")
-                        jd_conclusion = conn.get("_jd_conclusion", "")
-                        if jd_role:
-                            st.markdown(
-                                f'<span style="background:rgba(96,165,250,0.12);color:#60a5fa;font-size:0.72rem;'
-                                f'font-weight:700;padding:3px 10px;border-radius:20px;border:1px solid rgba(96,165,250,0.3);">'
-                                f'🎯 Best fit: {jd_role}</span>',
-                                unsafe_allow_html=True)
-                        if jd_conclusion:
-                            st.markdown(
-                                f'<div style="font-size:0.75rem;color:#9ca3af;line-height:1.4;'
-                                f'margin:6px 0;padding:6px 8px;background:rgba(255,255,255,0.03);'
-                                f'border-radius:8px;border-left:2px solid rgba(96,165,250,0.3);">'
-                                f'{jd_conclusion}</div>', unsafe_allow_html=True)
-
-                    with col_action:
-                        # Pipeline stage for THIS project
-                        current_idx = PIPELINE_STAGES.index(stage) if stage in PIPELINE_STAGES else 0
-                        new_stage = st.selectbox("Pipeline", PIPELINE_STAGES, index=current_idx, key=f"cpipe_{_proj_name}_{idx}")
-                        if new_stage != stage:
-                            update_pipeline(conn_key, new_stage, project_name=_proj_name)
-                            st.rerun()
-
-                        # Copy to another project
-                        other_projects = [p for p in project_names if p != _proj_name]
-                        if other_projects:
-                            add_proj = st.selectbox("➕ Copy to", ["—"] + other_projects, key=f"caddp_{_proj_name}_{idx}")
-                            if add_proj != "—":
-                                if st.button("Copy ✓", key=f"caddb_{_proj_name}_{idx}", use_container_width=True):
-                                    update_pipeline(conn_key, "Contacted", project_name=add_proj)
-                                    st.toast(f"Copied to {add_proj}", icon="📁")
+                            st.markdown(pipeline_badge(_nstage), unsafe_allow_html=True)
+                        with _nc2:
+                            _nname = _nc.get("name", "Unknown")
+                            if _nc.get("linkedin_url"):
+                                st.markdown(
+                                    f'<a href="{_nc["linkedin_url"]}" target="_blank" '
+                                    f'style="color:#60a5fa;text-decoration:none;font-weight:700;">'
+                                    f'{_nname} 🔗</a>', unsafe_allow_html=True)
+                            else:
+                                st.markdown(f"**{_nname}**")
+                            _details = []
+                            if _nc.get("title"): _details.append(_nc["title"])
+                            if _nc.get("company"): _details.append(f"🏢 {_nc['company']}")
+                            if _nc.get("location"): _details.append(f"📍 {_nc['location']}")
+                            if _details:
+                                st.caption(" · ".join(_details))
+                            _contact = []
+                            if _nc.get("email"): _contact.append(f"✉️ [{_nc['email']}](mailto:{_nc['email']})")
+                            if _nc.get("phone"): _contact.append(f"📞 {_nc['phone']}")
+                            if _contact: st.markdown("  ·  ".join(_contact))
+                        with _nc3:
+                            if _nstage == "New":
+                                if st.button(f"➕ Add", key=f"nadd_{_proj_name}_{_ni}",
+                                             type="primary", use_container_width=True):
+                                    update_pipeline(_nck, "Contacted", project_name=_proj_name)
+                                    st.toast(f"Added to {_proj_name}!", icon="✅")
                                     st.rerun()
-
-                        if conn.get("linkedin_url"):
-                            st.markdown(
-                                f'<a href="{conn["linkedin_url"]}" target="_blank" '
-                                f'style="display:block;text-align:center;padding:8px;'
-                                f'background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);'
-                                f'border-radius:8px;color:#d0d0d0;text-decoration:none;font-size:0.85rem;'
-                                f'font-weight:600;margin:4px 0;">🔗 LinkedIn</a>',
-                                unsafe_allow_html=True)
-
-                        # Notes
-                        existing_note = st.session_state["notes"].get(conn_key, "")
-                        new_note = st.text_area("📝", value=existing_note, height=50,
-                                                key=f"cnote_{_proj_name}_{idx}", placeholder="Notes...")
-                        if st.button("💾", key=f"csave_{_proj_name}_{idx}"):
-                            persist_note(conn_key, new_note)
-                            st.session_state["notes"][conn_key] = new_note
-                            st.toast("Saved!", icon="📝")
-
-                st.divider()
+                            else:
+                                st.markdown(
+                                    f'<span style="color:#22c55e;font-size:0.75rem;">✅ In project</span>',
+                                    unsafe_allow_html=True)
+                    st.divider()
+            else:
+                st.caption("No matching connections found in your network.")
 
     # ══════════════════════════════════════════
     # TAB: PIPELINE (within project workspace)
@@ -2270,16 +2054,38 @@ else:
                 _search_lookup[_login] = _sr
 
         candidates_in_project = _proj_pipeline
+
+        # Helper to resolve candidate info
+        def _resolve_cand(cand_key):
+            info = {"name": cand_key, "title": "", "company": "", "location": "",
+                    "linkedin_url": "", "email": "", "avatar_url": "", "score": None, "conclusion": ""}
+            if cand_key in _conn_lookup:
+                c = _conn_lookup[cand_key]
+                info.update({"name": c.get("name", cand_key), "title": c.get("title", ""),
+                             "company": c.get("company", ""), "location": c.get("location", ""),
+                             "linkedin_url": c.get("linkedin_url", ""), "email": c.get("email", "")})
+            elif cand_key in _search_lookup:
+                sr = _search_lookup[cand_key]
+                p = sr.get("profile", {})
+                info.update({"name": p.get("name") or p.get("login", cand_key),
+                             "title": p.get("bio", ""), "company": (p.get("company") or "").strip("@ "),
+                             "location": p.get("location", ""), "avatar_url": p.get("avatar_url", ""),
+                             "email": p.get("email", ""), "score": sr.get("score"),
+                             "conclusion": sr.get("conclusion", "")})
+            elif cand_key.startswith("conn_"):
+                info["name"] = cand_key[5:].replace("_", " ").title()
+            return info
+
         st.markdown(
-            f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">'
-            f'<h2 style="margin:0;">📊 Pipeline</h2>'
-            f'<span style="color:#6b7280;font-size:0.85rem;">'
-            f'{len(candidates_in_project)} candidate{"s" if len(candidates_in_project) != 1 else ""}</span></div>',
+            f'<h2 style="margin:0 0 8px 0;">📊 Pipeline · '
+            f'<span style="color:#6b7280;font-size:0.75em;">'
+            f'{len(candidates_in_project)} candidates</span></h2>',
             unsafe_allow_html=True)
 
         if not candidates_in_project:
-            st.info("No candidates in this project yet. Use **Search** or **My Network** to find and add candidates.")
+            st.info("No candidates yet. Use **Search** to find and add candidates.")
         else:
+            # Group by stage
             stage_groups = {s: [] for s in PIPELINE_STAGES[1:]}
             for cand_key, cand_data in candidates_in_project.items():
                 stage = cand_data.get("stage", "Contacted")
@@ -2287,169 +2093,121 @@ else:
                     stage_groups[stage] = []
                 stage_groups[stage].append((cand_key, cand_data))
 
-            active_stages = [s for s in PIPELINE_STAGES[1:] if stage_groups.get(s)]
-            if active_stages:
-                stage_tabs = st.tabs([f"{s} ({len(stage_groups[s])})" for s in active_stages])
-                for tab, stage_name in zip(stage_tabs, active_stages):
-                    with tab:
-                        colour, bg = STAGE_STYLE.get(stage_name, ("#9ca3af", "rgba(156,163,175,0.08)"))
+            # ── KANBAN BOARD ──
+            KANBAN_STAGES = ["Contacted", "Replied", "Interview", "Hired"]
+            kanban_cols = st.columns(len(KANBAN_STAGES))
+
+            for col_idx, stage_name in enumerate(KANBAN_STAGES):
+                colour, bg = STAGE_STYLE.get(stage_name, ("#9ca3af", "rgba(156,163,175,0.08)"))
+                cands_in_stage = stage_groups.get(stage_name, [])
+
+                with kanban_cols[col_idx]:
+                    # Column header
+                    st.markdown(
+                        f'<div style="background:{bg};border-top:3px solid {colour};'
+                        f'padding:8px 10px;border-radius:8px;margin-bottom:8px;text-align:center;">'
+                        f'<span style="font-weight:700;color:{colour};font-size:0.85rem;">'
+                        f'{stage_name}</span>'
+                        f'<span style="color:#6b7280;font-size:0.75rem;margin-left:6px;">'
+                        f'({len(cands_in_stage)})</span></div>',
+                        unsafe_allow_html=True)
+
+                    if not cands_in_stage:
                         st.markdown(
-                            f'<div style="background:{bg};border-left:3px solid {colour};'
-                            f'padding:8px 14px;border-radius:8px;margin-bottom:12px;'
-                            f'font-weight:700;color:{colour};font-size:1rem;">'
-                            f'{stage_name} — {len(stage_groups[stage_name])} candidate{"s" if len(stage_groups[stage_name]) != 1 else ""}</div>',
+                            '<div style="text-align:center;padding:20px;color:#4b5563;'
+                            'font-size:0.75rem;font-style:italic;">Empty</div>',
                             unsafe_allow_html=True)
 
-                        for ci, (cand_key, cand_data) in enumerate(stage_groups[stage_name]):
-                            updated = cand_data.get("updated", "")
-                            name = cand_key
-                            title = company = location = linkedin_url = email = avatar_url = ""
-                            score = None
-                            conclusion = ""
+                    for ci, (cand_key, cand_data) in enumerate(cands_in_stage):
+                        info = _resolve_cand(cand_key)
+                        name = info["name"]
+                        updated = cand_data.get("updated", "")
 
-                            if cand_key in _conn_lookup:
-                                conn = _conn_lookup[cand_key]
-                                name = conn.get("name", cand_key)
-                                title = conn.get("title", "")
-                                company = conn.get("company", "")
-                                location = conn.get("location", "")
-                                linkedin_url = conn.get("linkedin_url", "")
-                                email = conn.get("email", "")
+                        # Compact Kanban card
+                        with st.container():
+                            # Name (linked)
+                            if info["linkedin_url"]:
+                                st.markdown(
+                                    f'<a href="{info["linkedin_url"]}" target="_blank" '
+                                    f'style="color:#60a5fa;text-decoration:none;font-weight:700;font-size:0.85rem;">'
+                                    f'{name} 🔗</a>', unsafe_allow_html=True)
                             elif cand_key in _search_lookup:
-                                sr = _search_lookup[cand_key]
-                                profile = sr.get("profile", {})
-                                name = profile.get("name") or profile.get("login", cand_key)
-                                title = profile.get("bio", "")
-                                company = (profile.get("company") or "").strip("@ ")
-                                location = profile.get("location", "")
-                                avatar_url = profile.get("avatar_url", "")
-                                email = profile.get("email", "")
-                                score = sr.get("score")
-                                conclusion = sr.get("conclusion", "")
-                            elif cand_key.startswith("conn_"):
-                                name = cand_key[5:].replace("_", " ").title()
+                                st.markdown(
+                                    f'<a href="https://github.com/{cand_key}" target="_blank" '
+                                    f'style="color:#60a5fa;text-decoration:none;font-weight:700;font-size:0.85rem;">'
+                                    f'{name}</a>', unsafe_allow_html=True)
+                            else:
+                                st.markdown(f"**{name}**")
 
-                            with st.container():
-                                card_col1, card_col2, card_col3 = st.columns([1, 4, 2])
+                            # Quick details
+                            _parts = []
+                            if info["title"]:
+                                _parts.append(info["title"][:40])
+                            if info["company"]:
+                                _parts.append(info["company"])
+                            if _parts:
+                                st.markdown(
+                                    f'<div style="font-size:0.7rem;color:#9ca3af;line-height:1.3;">'
+                                    f'{" · ".join(_parts)}</div>',
+                                    unsafe_allow_html=True)
 
-                                with card_col1:
-                                    if avatar_url:
-                                        st.markdown(
-                                            f'<img src="{avatar_url}" style="width:48px;height:48px;'
-                                            f'border-radius:50%;border:2px solid {colour}40;">',
-                                            unsafe_allow_html=True)
-                                    elif score is not None:
-                                        s_color = "#22c55e" if score >= 7 else "#60a5fa" if score >= 5 else "#f59e0b" if score >= 3 else "#ef4444"
-                                        st.markdown(
-                                            f'<div style="display:inline-block;background:{s_color}18;color:{s_color};'
-                                            f'font-size:1.1rem;font-weight:800;padding:8px 12px;border-radius:10px;'
-                                            f'border:1px solid {s_color}40;text-align:center;min-width:48px;">'
-                                            f'{score}</div>',
-                                            unsafe_allow_html=True)
-                                    else:
-                                        st.markdown(
-                                            f'<div style="width:48px;height:48px;border-radius:50%;'
-                                            f'background:{bg};border:2px solid {colour}40;display:flex;'
-                                            f'align-items:center;justify-content:center;font-size:1.2rem;'
-                                            f'font-weight:700;color:{colour};">'
-                                            f'{name[0].upper() if name else "?"}</div>',
-                                            unsafe_allow_html=True)
+                            # Score badge (inline)
+                            if info["score"] is not None:
+                                s_color = "#22c55e" if info["score"] >= 7 else "#60a5fa" if info["score"] >= 5 else "#f59e0b" if info["score"] >= 3 else "#ef4444"
+                                st.markdown(
+                                    f'<span style="background:{s_color}18;color:{s_color};font-size:0.7rem;'
+                                    f'font-weight:700;padding:2px 6px;border-radius:6px;">'
+                                    f'{info["score"]}/10</span>',
+                                    unsafe_allow_html=True)
 
-                                with card_col2:
-                                    if linkedin_url:
-                                        st.markdown(
-                                            f'<h4 style="margin:0;"><a href="{linkedin_url}" target="_blank" '
-                                            f'style="color:#60a5fa;text-decoration:none;">{name} 🔗</a></h4>',
-                                            unsafe_allow_html=True)
-                                    elif cand_key in _search_lookup:
-                                        st.markdown(
-                                            f'<h4 style="margin:0;"><a href="https://github.com/{cand_key}" target="_blank" '
-                                            f'style="color:#60a5fa;text-decoration:none;">{name}</a></h4>',
-                                            unsafe_allow_html=True)
-                                    else:
-                                        st.markdown(f"#### {name}")
-
-                                    details = []
-                                    if title: details.append(title)
-                                    if company: details.append(f"🏢 {company}")
-                                    if location: details.append(f"📍 {location}")
-                                    if details:
-                                        st.caption(" · ".join(details))
-                                    if email:
-                                        st.markdown(f"✉️ [{email}](mailto:{email})")
-                                    if conclusion:
-                                        st.markdown(
-                                            f'<div style="font-size:0.75rem;color:#9ca3af;line-height:1.4;'
-                                            f'margin:4px 0;padding:6px 8px;background:rgba(255,255,255,0.03);'
-                                            f'border-radius:8px;border-left:2px solid {colour}40;">'
-                                            f'{conclusion}</div>',
-                                            unsafe_allow_html=True)
-                                    st.markdown(
-                                        f'<span style="font-size:0.7rem;color:#6b7280;">Updated: {updated}</span>',
-                                        unsafe_allow_html=True)
-
-                                with card_col3:
-                                    current_stage_idx = PIPELINE_STAGES.index(stage_name) if stage_name in PIPELINE_STAGES else 0
-                                    new_stage = st.selectbox(
-                                        "Move to", PIPELINE_STAGES, index=current_stage_idx,
-                                        key=f"pls_{_proj_name}_{cand_key}_{ci}")
-                                    if new_stage != stage_name:
-                                        update_pipeline(cand_key, new_stage, project_name=_proj_name)
+                            # Move buttons — ◀ ▶
+                            stage_idx = KANBAN_STAGES.index(stage_name)
+                            btn_l, btn_r, btn_x = st.columns([1, 1, 1])
+                            with btn_l:
+                                if stage_idx > 0:
+                                    prev_stage = KANBAN_STAGES[stage_idx - 1]
+                                    if st.button("◀", key=f"kb_l_{_proj_name}_{cand_key}_{ci}",
+                                                 help=f"Move to {prev_stage}", use_container_width=True):
+                                        update_pipeline(cand_key, prev_stage, project_name=_proj_name)
                                         st.rerun()
-
-                                    other_projs = [p for p in project_names if p != _proj_name]
-                                    if other_projs:
-                                        move_proj = st.selectbox(
-                                            "Copy to", ["—"] + other_projs,
-                                            key=f"plm_{_proj_name}_{cand_key}_{ci}")
-                                        if move_proj != "—":
-                                            if st.button("Copy ✓", key=f"plmb_{_proj_name}_{cand_key}_{ci}", use_container_width=True):
-                                                update_pipeline(cand_key, stage_name, project_name=move_proj)
-                                                st.toast(f"Copied to {move_proj}", icon="📁")
-                                                st.rerun()
-
-                                    if st.button("❌ Remove", key=f"plrm_{_proj_name}_{cand_key}_{ci}", use_container_width=True):
-                                        update_pipeline(cand_key, "New", project_name=_proj_name)
-                                        st.toast(f"Removed", icon="🗑️")
+                            with btn_r:
+                                if stage_idx < len(KANBAN_STAGES) - 1:
+                                    next_stage = KANBAN_STAGES[stage_idx + 1]
+                                    if st.button("▶", key=f"kb_r_{_proj_name}_{cand_key}_{ci}",
+                                                 help=f"Move to {next_stage}", use_container_width=True):
+                                        update_pipeline(cand_key, next_stage, project_name=_proj_name)
                                         st.rerun()
+                            with btn_x:
+                                if st.button("✕", key=f"kb_x_{_proj_name}_{cand_key}_{ci}",
+                                             help="Remove", use_container_width=True):
+                                    update_pipeline(cand_key, "New", project_name=_proj_name)
+                                    st.toast("Removed", icon="🗑️")
+                                    st.rerun()
 
-                                    existing_note = st.session_state["notes"].get(cand_key, "")
-                                    new_note = st.text_area("📝", value=existing_note, height=50,
-                                                            key=f"pln_{_proj_name}_{cand_key}_{ci}", placeholder="Notes...")
-                                    if st.button("💾", key=f"plns_{_proj_name}_{cand_key}_{ci}"):
-                                        persist_note(cand_key, new_note)
-                                        st.session_state["notes"][cand_key] = new_note
-                                        st.toast("Saved!", icon="📝")
+            # ── Archived section (collapsible) ──
+            archived = stage_groups.get("Archived", [])
+            if archived:
+                with st.expander(f"🗂️ Archived ({len(archived)})", expanded=False):
+                    for ci, (cand_key, cand_data) in enumerate(archived):
+                        info = _resolve_cand(cand_key)
+                        arc1, arc2 = st.columns([4, 1])
+                        with arc1:
+                            st.markdown(f"**{info['name']}** — {info.get('title', '')[:40]}")
+                        with arc2:
+                            if st.button("Restore", key=f"arc_restore_{_proj_name}_{cand_key}_{ci}", use_container_width=True):
+                                update_pipeline(cand_key, "Contacted", project_name=_proj_name)
+                                st.rerun()
 
-                            st.divider()
+            st.divider()
 
             # Export
-            st.markdown("")
             proj_csv = io.StringIO()
             pw = csv.writer(proj_csv)
             pw.writerow(["Name", "Stage", "Updated", "Title", "Company", "Location", "Email", "LinkedIn"])
             for cand_key, cand_data in candidates_in_project.items():
-                _name = cand_key
-                _title = _company = _location = _email = _linkedin = ""
-                if cand_key in _conn_lookup:
-                    c = _conn_lookup[cand_key]
-                    _name = c.get("name", cand_key)
-                    _title = c.get("title", "")
-                    _company = c.get("company", "")
-                    _location = c.get("location", "")
-                    _email = c.get("email", "")
-                    _linkedin = c.get("linkedin_url", "")
-                elif cand_key in _search_lookup:
-                    p = _search_lookup[cand_key].get("profile", {})
-                    _name = p.get("name") or p.get("login", cand_key)
-                    _title = p.get("bio", "")
-                    _company = (p.get("company") or "").strip("@ ")
-                    _location = p.get("location", "")
-                    _email = p.get("email", "")
-                elif cand_key.startswith("conn_"):
-                    _name = cand_key[5:].replace("_", " ").title()
-                pw.writerow([_name, cand_data.get("stage", ""), cand_data.get("updated", ""),
-                             _title, _company, _location, _email, _linkedin])
+                _ci = _resolve_cand(cand_key)
+                pw.writerow([_ci["name"], cand_data.get("stage", ""), cand_data.get("updated", ""),
+                             _ci["title"], _ci["company"], _ci["location"], _ci["email"], _ci["linkedin_url"]])
             st.download_button(
                 f"⬇️ Export {_proj_name} Pipeline",
                 proj_csv.getvalue().encode("utf-8"),

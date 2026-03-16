@@ -408,18 +408,53 @@ def _location_matches(profile_location, query_loc):
 def search_connections(connections, query="", location="", company="", title=""):
     results = connections
     if query.strip():
-        # Split query into keywords — match ANY keyword against name/email/title/company
-        keywords = [k.lower().strip() for k in query.lower().strip().split() if k.strip()]
-        def _matches_query(c):
+        q_lower = query.lower().strip()
+        # Remove noise words for keyword matching
+        _noise = {"a", "an", "the", "of", "for", "in", "at", "to", "and", "or", "with", "on"}
+        # Phase 1: exact phrase match (highest quality)
+        phrase_matches = []
+        # Phase 2: multi-word phrase chunks (2-3 word combos)
+        chunk_matches = []
+        # Phase 3: keyword match (any meaningful keyword)
+        keyword_matches = []
+
+        # Build meaningful keywords (drop noise words)
+        all_words = [w for w in q_lower.split() if w.strip()]
+        meaningful = [w for w in all_words if w not in _noise and len(w) > 1]
+
+        # Build 2-word and 3-word phrase chunks from the query
+        chunks_2 = [f"{all_words[i]} {all_words[i+1]}" for i in range(len(all_words)-1)]
+        chunks_3 = [f"{all_words[i]} {all_words[i+1]} {all_words[i+2]}" for i in range(len(all_words)-2)]
+        phrase_chunks = chunks_3 + chunks_2  # prioritise longer chunks
+
+        seen = set()
+        for c in results:
             haystack = " ".join([
                 c.get("name", ""), c.get("email", ""),
                 c.get("title", ""), c.get("company", ""),
                 c.get("bio", ""), c.get("skills", ""),
+                c.get("category", ""),
             ]).lower()
-            return any(kw in haystack for kw in keywords)
-        results = [c for c in results if _matches_query(c)]
+            cid = id(c)
+            # Exact phrase
+            if q_lower in haystack:
+                phrase_matches.append(c)
+                seen.add(cid)
+                continue
+            # Multi-word chunk match
+            chunk_hit = any(ch in haystack for ch in phrase_chunks)
+            if chunk_hit and cid not in seen:
+                chunk_matches.append(c)
+                seen.add(cid)
+                continue
+            # Keyword match — require ALL meaningful keywords (not any)
+            if meaningful and all(kw in haystack for kw in meaningful) and cid not in seen:
+                keyword_matches.append(c)
+                seen.add(cid)
+
+        results = phrase_matches + chunk_matches + keyword_matches
+
     if location.strip():
-        # Use fuzzy location matching with aliases (same as GitHub search)
         results = [c for c in results if _location_matches(c.get("location", ""), location)]
     if company.strip():
         comp = company.lower().strip()
@@ -672,6 +707,50 @@ Reply with ONLY the search query, nothing else. Example: "machine learning pytho
         return resp.choices[0].message.content.strip().strip('"').strip("'")
     except Exception:
         return ""
+
+
+def classify_role_and_expand(role_text, job_description=""):
+    """Classify if a role is technical (GitHub-searchable) or business/commercial (network-only).
+    Also generate expanded search synonyms for network searching."""
+    if not OPENAI_KEY_OK:
+        return {"type": "technical", "synonyms": [], "network_queries": [role_text]}
+    from openai import OpenAI
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    context = role_text
+    if job_description:
+        context += "\n\nJD context: " + job_description[:1000]
+    prompt = f"""Analyse this role and classify it.
+
+ROLE: {context}
+
+Reply with ONLY a JSON object:
+{{
+  "type": "technical" or "business",
+  "confidence": 0.0-1.0,
+  "reason": "one sentence why",
+  "network_queries": ["list of 5-10 alternative job title searches to find this person in a LinkedIn/professional network CSV"],
+  "synonyms": ["list of related job titles, e.g. Head of Acquisitions -> VP Land, Site Acquisition Manager, Real Estate Director, etc."]
+}}
+
+RULES:
+- "technical" = roles where the person would likely have a GitHub profile (software engineers, ML engineers, DevOps, data scientists, etc.)
+- "business" = roles where GitHub is unlikely (sales, acquisitions, operations, HR, finance, legal, BD, marketing, C-suite, etc.)
+- network_queries should be diverse: include abbreviations (VP, SVP, Dir), industry terms, and related titles
+- For "Head of Acquisitions for Data Centres": synonyms might include "Site Acquisition", "Land Acquisition", "Real Estate", "Data Center Development", "Infrastructure Development", "VP Real Estate"
+"""
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=300,
+            temperature=0.2,
+        )
+        raw = resp.choices[0].message.content.strip()
+        data = json.loads(raw[raw.find("{"):raw.rfind("}") + 1])
+        return data
+    except Exception:
+        return {"type": "technical", "synonyms": [], "network_queries": [role_text]}
+
 
 # ─────────────────────────────────────────────
 # Multi-Query Search Strategy
@@ -1642,43 +1721,67 @@ else:
                 st.warning("Add a job description to this project, or type search terms above.")
                 st.stop()
 
-            with st.spinner(f"🤖 Generating search queries for {len(roles_found) if roles_found else 1} role{'s' if len(roles_found) != 1 else ''}…"):
-                ai_queries = generate_search_queries(
-                    role_query, location_query, company_query, seniority, job_description,
-                    roles_list=roles_found if roles_found else None
+            # ── Smart role classification: technical vs business ──
+            _role_class = classify_role_and_expand(role_query, job_description)
+            _role_type = _role_class.get("type", "technical")
+            _net_queries = _role_class.get("network_queries", [])
+            _synonyms = _role_class.get("synonyms", [])
+            _skip_github = False
+
+            if _role_type == "business":
+                st.info(
+                    f"💼 **Business role detected** — {_role_class.get('reason', 'not typically found on GitHub')}. "
+                    f"Prioritising your network. Also searching: {', '.join(_synonyms[:5])}"
                 )
-            if not ai_queries:
+                _skip_github = True  # Skip GitHub for pure business roles
+
+            # Store expanded queries for network search later
+            st.session_state["_net_expanded_queries"] = _net_queries + _synonyms
+
+            if not _skip_github:
+                with st.spinner(f"🤖 Generating search queries for {len(roles_found) if roles_found else 1} role{'s' if len(roles_found) != 1 else ''}…"):
+                    ai_queries = generate_search_queries(
+                        role_query, location_query, company_query, seniority, job_description,
+                        roles_list=roles_found if roles_found else None
+                    )
+            else:
+                ai_queries = []  # No GitHub search for business roles
+            if not ai_queries and not _skip_github:
                 ai_queries = [build_user_query()]
 
-            with st.expander(f"🔎 Running {len(ai_queries)} search queries", expanded=False):
-                for qi, q in enumerate(ai_queries, 1):
-                    st.markdown(f"**Query {qi}:** `{q}`")
+            if ai_queries:
+                with st.expander(f"🔎 Running {len(ai_queries)} search queries", expanded=False):
+                    for qi, q in enumerate(ai_queries, 1):
+                        st.markdown(f"**Query {qi}:** `{q}`")
 
             per_query_limit = 200
             all_users = []
             seen_logins = set()
+            candidates = []
 
-            def _run_query(query):
-                results, err = search_users_direct(query, per_query_limit)
-                if err and not results:
-                    return [], err
-                return results, None
+            if ai_queries and not _skip_github:
+                def _run_query(query):
+                    results, err = search_users_direct(query, per_query_limit)
+                    if err and not results:
+                        return [], err
+                    return results, None
 
-            with st.spinner(f"Searching GitHub with {len(ai_queries)} queries…"):
-                query_errors = []
-                with ThreadPoolExecutor(max_workers=min(15, len(ai_queries))) as executor:
-                    futures = {executor.submit(_run_query, q): q for q in ai_queries}
-                    for future in as_completed(futures):
-                        users_batch, err = future.result()
-                        if err:
-                            query_errors.append(err)
-                        for u in users_batch:
-                            if u["login"] not in seen_logins:
-                                seen_logins.add(u["login"])
-                                all_users.append(u)
-                if query_errors and not all_users:
-                    st.error(f"All queries failed: {query_errors[0]}")
-                    st.stop()
+                with st.spinner(f"Searching GitHub with {len(ai_queries)} queries…"):
+                    query_errors = []
+                    with ThreadPoolExecutor(max_workers=min(15, len(ai_queries))) as executor:
+                        futures = {executor.submit(_run_query, q): q for q in ai_queries}
+                        for future in as_completed(futures):
+                            users_batch, err = future.result()
+                            if err:
+                                query_errors.append(err)
+                            for u in users_batch:
+                                if u["login"] not in seen_logins:
+                                    seen_logins.add(u["login"])
+                                    all_users.append(u)
+                    if query_errors and not all_users and not _skip_github:
+                        st.error(f"All queries failed: {query_errors[0]}")
+
+                st.info(f"Found **{len(all_users)}** unique GitHub candidates across {len(ai_queries)} queries")
 
             linkedin_profiles = []
             if PROXYCURL_OK:
@@ -1692,66 +1795,58 @@ else:
                         linkedin_profiles = li_results
                         st.info(f"🔗 Found {len(li_results)} LinkedIn profiles")
 
-            st.info(f"Found **{len(all_users)}** unique GitHub candidates across {len(ai_queries)} queries")
+            if all_users:
+                # Cap users to fetch — GitHub API can't handle thousands of concurrent requests
+                fetch_limit = min(len(all_users), max(max_candidates * 3, 300), 1500)
+                users = all_users[:fetch_limit]
+                if len(all_users) > fetch_limit:
+                    st.caption(f"ℹ️ Fetching top {fetch_limit} of {len(all_users)} candidates (sorted by GitHub relevance)")
 
-            if not all_users:
-                st.warning("No users found. Try broader filters.")
-                st.stop()
+                st.markdown(f"### ⚡ Fetching {len(users)} profiles…")
+                prog = st.progress(0)
+                cache = _load_cache()
 
-            # Cap users to fetch — GitHub API can't handle thousands of concurrent requests
-            # Fetch up to max_candidates * 3 to allow for filtering, capped at 1500
-            fetch_limit = min(len(all_users), max(max_candidates * 3, 300), 1500)
-            users = all_users[:fetch_limit]
-            if len(all_users) > fetch_limit:
-                st.caption(f"ℹ️ Fetching top {fetch_limit} of {len(all_users)} candidates (sorted by GitHub relevance)")
-
-            st.markdown(f"### ⚡ Fetching {len(users)} profiles…")
-            prog = st.progress(0)
-            cache = _load_cache()
-
-            def _fetch_one(user):
-                username = user["login"]
-                try:
-                    entry = cache.get(username)
-                    if entry and time.time() - entry.get("ts", 0) < CACHE_TTL:
-                        profile = entry["data"]
-                    else:
-                        profile = _fetch_user_profile(username)
-                        if profile:
-                            cache[username] = {"ts": time.time(), "data": profile}
-                    if not profile:
-                        return None
-                    user_repos = get_user_repos(username)
-                    languages = get_user_languages(username, repos=user_repos)
-                    return {
-                        "contributor": {"contributions": 0, "login": username},
-                        "profile": profile,
-                        "user_repos": user_repos,
-                        "languages": languages,
-                        "score": None,
-                        "reason": "",
-                        "conclusion": "",
-                    }
-                except Exception:
-                    return None
-
-            candidates = []
-            done = 0
-            # Use 15 workers to avoid overwhelming connections
-            with ThreadPoolExecutor(max_workers=15) as executor:
-                futures = {executor.submit(_fetch_one, u): u for u in users}
-                for future in as_completed(futures):
-                    done += 1
-                    prog.progress(done / len(users))
+                def _fetch_one(user):
+                    username = user["login"]
                     try:
-                        result = future.result()
+                        entry = cache.get(username)
+                        if entry and time.time() - entry.get("ts", 0) < CACHE_TTL:
+                            profile = entry["data"]
+                        else:
+                            profile = _fetch_user_profile(username)
+                            if profile:
+                                cache[username] = {"ts": time.time(), "data": profile}
+                        if not profile:
+                            return None
+                        user_repos = get_user_repos(username)
+                        languages = get_user_languages(username, repos=user_repos)
+                        return {
+                            "contributor": {"contributions": 0, "login": username},
+                            "profile": profile,
+                            "user_repos": user_repos,
+                            "languages": languages,
+                            "score": None,
+                            "reason": "",
+                            "conclusion": "",
+                        }
                     except Exception:
-                        result = None
-                    if result:
-                        result["source"] = "github"
-                        candidates.append(result)
-            prog.empty()
-            _save_cache(cache)
+                        return None
+
+                done = 0
+                with ThreadPoolExecutor(max_workers=15) as executor:
+                    futures = {executor.submit(_fetch_one, u): u for u in users}
+                    for future in as_completed(futures):
+                        done += 1
+                        prog.progress(done / len(users))
+                        try:
+                            result = future.result()
+                        except Exception:
+                            result = None
+                        if result:
+                            result["source"] = "github"
+                            candidates.append(result)
+                prog.empty()
+                _save_cache(cache)
 
             total_fetched = len(candidates)
 
@@ -1778,13 +1873,33 @@ else:
             # ── Merge network connections into results ──
             _net_conns_for_merge = load_connections()
             if _net_conns_for_merge:
+                # Use expanded queries from AI classification for broader network search
+                _expanded = st.session_state.get("_net_expanded_queries", [])
                 _net_keyword = role_query or (_extra_input.strip()[:100] if _extra_input.strip() else "")
-                _net_matches = search_connections(_net_conns_for_merge, _net_keyword, location_query, company_query, "")
+
+                # Run multiple search passes: original query + each synonym/expanded query
+                _all_net_matches = []
+                _seen_net_names = set()
+
+                # Pass 1: Original query
+                for _qry in [_net_keyword] + _expanded:
+                    if not _qry.strip():
+                        continue
+                    _batch = search_connections(_net_conns_for_merge, _qry, location_query, company_query, "")
+                    for _nc in _batch:
+                        _nk = _nc.get("name", "").lower()
+                        if _nk and _nk not in _seen_net_names:
+                            _seen_net_names.add(_nk)
+                            _all_net_matches.append(_nc)
+
+                _net_matches = _all_net_matches
+                _net_cap = 200 if _skip_github else 50  # More network results when GitHub is skipped
+
                 # Deduplicate: skip network matches already in GitHub results by name
                 _gh_names = {(c["profile"].get("name") or "").lower() for c in candidates}
                 _gh_logins = {c["profile"]["login"].lower() for c in candidates}
                 _added_net = 0
-                for _nc in _net_matches[:50]:  # cap at 50 network matches
+                for _nc in _net_matches[:_net_cap]:
                     _nc_name = _nc.get("name", "").lower()
                     if _nc_name in _gh_names or not _nc_name:
                         continue
@@ -1825,7 +1940,10 @@ else:
                     st.info(f"📇 Also included **{_added_net} matches** from your network")
 
             if not candidates:
-                st.warning("No candidates after filtering.")
+                if _skip_github:
+                    st.warning("No matching connections found in your network for this business role. Try uploading more CSVs with relevant contacts.")
+                else:
+                    st.warning("No candidates after filtering.")
                 st.stop()
 
             score_label = role_query or "the role"

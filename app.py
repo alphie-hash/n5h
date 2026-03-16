@@ -1067,6 +1067,20 @@ def render_candidate(c, idx, role_query, pipeline, connections=None, project_nam
 
         with col_info:
             name      = profile.get("name") or username
+            # Source badge
+            _source = c.get("source", "github")
+            if _source == "network":
+                source_badge = (
+                    ' <span style="background:rgba(168,85,247,0.12);color:#a855f7;font-size:0.6rem;'
+                    'font-weight:700;padding:2px 7px;border-radius:12px;border:1px solid rgba(168,85,247,0.3);'
+                    'vertical-align:middle;letter-spacing:0.03em;">NETWORK</span>'
+                )
+            else:
+                source_badge = (
+                    ' <span style="background:rgba(255,255,255,0.06);color:#9ca3af;font-size:0.6rem;'
+                    'font-weight:700;padding:2px 7px;border-radius:12px;border:1px solid rgba(255,255,255,0.12);'
+                    'vertical-align:middle;letter-spacing:0.03em;">GITHUB</span>'
+                )
             otw_badge = (
                 ' <span style="background:#16a34a22;color:#4ade80;font-size:0.7rem;'
                 'font-weight:700;padding:3px 8px;border-radius:20px;border:1px solid #16a34a66;'
@@ -1089,13 +1103,13 @@ def render_candidate(c, idx, role_query, pipeline, connections=None, project_nam
                     f'<h3 style="margin:0;padding:0;"><a href="{linkedin_url}" target="_blank" '
                     f'style="color:#60a5fa;text-decoration:none;">{name} '
                     f'<span style="font-size:0.6em;vertical-align:middle;">🔗</span></a>'
-                    f'{otw_badge}{net_badge}</h3>',
+                    f'{source_badge}{otw_badge}{net_badge}</h3>',
                     unsafe_allow_html=True)
             else:
                 st.markdown(
                     f'<h3 style="margin:0;padding:0;"><a href="https://github.com/{username}" target="_blank" '
                     f'style="color:#e0e0e0;text-decoration:none;">{name}</a>'
-                    f'{otw_badge}{net_badge}</h3>',
+                    f'{source_badge}{otw_badge}{net_badge}</h3>',
                     unsafe_allow_html=True)
             if conn_match:
                 conn_details = []
@@ -1734,6 +1748,7 @@ else:
                     except Exception:
                         result = None
                     if result:
+                        result["source"] = "github"
                         candidates.append(result)
             prog.empty()
             _save_cache(cache)
@@ -1759,6 +1774,55 @@ else:
                     candidates = filtered
 
             candidates = candidates[:max_candidates]
+
+            # ── Merge network connections into results ──
+            _net_conns_for_merge = load_connections()
+            if _net_conns_for_merge:
+                _net_keyword = role_query or (_extra_input.strip()[:100] if _extra_input.strip() else "")
+                _net_matches = search_connections(_net_conns_for_merge, _net_keyword, location_query, company_query, "")
+                # Deduplicate: skip network matches already in GitHub results by name
+                _gh_names = {(c["profile"].get("name") or "").lower() for c in candidates}
+                _gh_logins = {c["profile"]["login"].lower() for c in candidates}
+                _added_net = 0
+                for _nc in _net_matches[:50]:  # cap at 50 network matches
+                    _nc_name = _nc.get("name", "").lower()
+                    if _nc_name in _gh_names or not _nc_name:
+                        continue
+                    # Create pseudo-candidate dict so render_candidate works
+                    _nc_login = f"conn_{_nc_name.replace(' ', '_')}"
+                    if _nc_login in _gh_logins:
+                        continue
+                    _pseudo = {
+                        "profile": {
+                            "login": _nc_login,
+                            "name": _nc.get("name", ""),
+                            "bio": _nc.get("title", ""),
+                            "company": _nc.get("company", ""),
+                            "location": _nc.get("location", ""),
+                            "email": _nc.get("email", ""),
+                            "avatar_url": "",
+                            "html_url": _nc.get("linkedin_url", ""),
+                            "hireable": False,
+                            "followers": 0,
+                            "following": 0,
+                            "public_repos": 0,
+                            "created_at": "",
+                            "twitter_username": "",
+                            "blog": "",
+                        },
+                        "user_repos": [],
+                        "languages": [],
+                        "score": None,
+                        "reason": "",
+                        "conclusion": "",
+                        "source": "network",
+                        "contributor": {},
+                        "_conn_data": _nc,  # keep original connection data
+                    }
+                    candidates.append(_pseudo)
+                    _added_net += 1
+                if _added_net:
+                    st.info(f"📇 Also included **{_added_net} matches** from your network")
 
             if not candidates:
                 st.warning("No candidates after filtering.")
@@ -1904,64 +1968,7 @@ else:
                             st.session_state[_rpk] += 1
                             st.rerun()
 
-        # ── Network Matches section (unified into Search tab) ──
-        _net_conns = load_connections()
-        if _net_conns and (role_query or job_description):
-            st.divider()
-            st.markdown("### 📇 Network Matches")
-            st.caption("Connections from your uploaded CSVs that match this search")
-            _net_keyword = role_query or (_extra_input.strip()[:100] if _extra_input.strip() else "")
-            _net_results = search_connections(_net_conns, _net_keyword, location_query, company_query, "")
-            if _net_results:
-                st.success(f"**{len(_net_results[:20])} network matches** (showing top 20)")
-                _pipeline = _proj_pipeline
-                for _ni, _nc in enumerate(_net_results[:20]):
-                    _nck = f"conn_{_nc.get('name','').lower().replace(' ','_')}"
-                    _nstage = _pipeline.get(_nck, {}).get("stage", "New")
-                    with st.container():
-                        _nc1, _nc2, _nc3 = st.columns([1, 4, 1])
-                        with _nc1:
-                            tier = (_nc.get("tier") or "").upper()
-                            tier_colors = {"WORLD-CLASS": "#22c55e", "STRONG": "#60a5fa", "MAYBE": "#fbbf24"}
-                            _tc = tier_colors.get(tier, "#4b5563")
-                            st.markdown(
-                                f'<div style="color:{_tc};font-size:0.75rem;font-weight:700;'
-                                f'padding:6px;text-align:center;">{tier or "—"}</div>',
-                                unsafe_allow_html=True)
-                            st.markdown(pipeline_badge(_nstage), unsafe_allow_html=True)
-                        with _nc2:
-                            _nname = _nc.get("name", "Unknown")
-                            if _nc.get("linkedin_url"):
-                                st.markdown(
-                                    f'<a href="{_nc["linkedin_url"]}" target="_blank" '
-                                    f'style="color:#60a5fa;text-decoration:none;font-weight:700;">'
-                                    f'{_nname} 🔗</a>', unsafe_allow_html=True)
-                            else:
-                                st.markdown(f"**{_nname}**")
-                            _details = []
-                            if _nc.get("title"): _details.append(_nc["title"])
-                            if _nc.get("company"): _details.append(f"🏢 {_nc['company']}")
-                            if _nc.get("location"): _details.append(f"📍 {_nc['location']}")
-                            if _details:
-                                st.caption(" · ".join(_details))
-                            _contact = []
-                            if _nc.get("email"): _contact.append(f"✉️ [{_nc['email']}](mailto:{_nc['email']})")
-                            if _nc.get("phone"): _contact.append(f"📞 {_nc['phone']}")
-                            if _contact: st.markdown("  ·  ".join(_contact))
-                        with _nc3:
-                            if _nstage == "New":
-                                if st.button(f"➕ Add", key=f"nadd_{_proj_name}_{_ni}",
-                                             type="primary", use_container_width=True):
-                                    update_pipeline(_nck, "Contacted", project_name=_proj_name)
-                                    st.toast(f"Added to {_proj_name}!", icon="✅")
-                                    st.rerun()
-                            else:
-                                st.markdown(
-                                    f'<span style="color:#22c55e;font-size:0.75rem;">✅ In project</span>',
-                                    unsafe_allow_html=True)
-                    st.divider()
-            else:
-                st.caption("No matching connections found in your network.")
+        # Network results are now merged into the main results list above
 
     # ══════════════════════════════════════════
     # TAB: PIPELINE (within project workspace)
@@ -2056,19 +2063,26 @@ else:
 
                         # Compact Kanban card
                         with st.container():
+                            # Source indicator
+                            _is_network = cand_key.startswith("conn_")
+                            _src_tag = (
+                                '<span style="color:#a855f7;font-size:0.55rem;font-weight:700;">NET</span> '
+                                if _is_network else
+                                '<span style="color:#6b7280;font-size:0.55rem;font-weight:700;">GH</span> '
+                            )
                             # Name (linked)
                             if info["linkedin_url"]:
                                 st.markdown(
-                                    f'<a href="{info["linkedin_url"]}" target="_blank" '
+                                    f'{_src_tag}<a href="{info["linkedin_url"]}" target="_blank" '
                                     f'style="color:#60a5fa;text-decoration:none;font-weight:700;font-size:0.85rem;">'
                                     f'{name} 🔗</a>', unsafe_allow_html=True)
                             elif cand_key in _search_lookup:
                                 st.markdown(
-                                    f'<a href="https://github.com/{cand_key}" target="_blank" '
+                                    f'{_src_tag}<a href="https://github.com/{cand_key}" target="_blank" '
                                     f'style="color:#60a5fa;text-decoration:none;font-weight:700;font-size:0.85rem;">'
                                     f'{name}</a>', unsafe_allow_html=True)
                             else:
-                                st.markdown(f"**{name}**")
+                                st.markdown(f"{_src_tag}**{name}**", unsafe_allow_html=True)
 
                             # Quick details
                             _parts = []

@@ -1138,23 +1138,46 @@ def render_candidate(c, idx, role_query, pipeline, connections=None, project_nam
                 tags = "  ".join([f"`{pn}: {ps}`" for pn, ps in in_projects])
                 st.markdown(f"📁 {tags}", help="Projects this candidate is in")
 
-            # Stage selector for current project
-            current_idx = PIPELINE_STAGES.index(stage) if stage in PIPELINE_STAGES else 0
-            new_stage = st.selectbox("Pipeline", PIPELINE_STAGES, index=current_idx, key=f"pipe_{_pname}_{username}_{idx}")
-            if new_stage != stage:
-                update_pipeline(username, new_stage, project_name=_pname)
-                st.rerun()
+            # Check if candidate is already in this project
+            _in_current_project = stage != "New"
 
-            # Copy to another project
+            if _in_current_project:
+                # Already in project — show stage management
+                st.markdown(
+                    f'<span style="background:#22c55e18;color:#22c55e;font-size:0.72rem;font-weight:700;'
+                    f'padding:3px 10px;border-radius:20px;border:1px solid #22c55e40;">'
+                    f'✅ In {_pname}</span>', unsafe_allow_html=True)
+                current_idx = PIPELINE_STAGES.index(stage) if stage in PIPELINE_STAGES else 0
+                new_stage = st.selectbox("Stage", PIPELINE_STAGES[1:],
+                                         index=max(0, current_idx - 1),
+                                         key=f"pipe_{_pname}_{username}_{idx}")
+                if new_stage != stage:
+                    update_pipeline(username, new_stage, project_name=_pname)
+                    st.rerun()
+                # Remove from project
+                if st.button("❌ Remove from project", key=f"rmpipe_{_pname}_{username}_{idx}", use_container_width=True):
+                    update_pipeline(username, "New", project_name=_pname)
+                    st.toast(f"Removed from {_pname}", icon="🗑️")
+                    st.rerun()
+            else:
+                # NOT in project — show "Add to project" button
+                add_stage = st.selectbox("Add as", PIPELINE_STAGES[1:], key=f"addstage_{_pname}_{username}_{idx}")
+                if st.button(f"➕ Add to {_pname}", key=f"addbtn_{_pname}_{username}_{idx}",
+                             type="primary", use_container_width=True):
+                    update_pipeline(username, add_stage, project_name=_pname)
+                    st.toast(f"Added to {_pname}!", icon="✅")
+                    st.rerun()
+
+            # Add to OTHER projects
             proj_data = load_projects()
             proj_names = list(proj_data.get("projects", {}).keys())
             other_projects = [p for p in proj_names if p != _pname]
             if other_projects:
-                add_proj = st.selectbox("➕ Copy to project", ["—"] + other_projects, key=f"addproj_{_pname}_{username}_{idx}")
+                add_proj = st.selectbox("➕ Add to another project", ["—"] + other_projects, key=f"copyproj_{_pname}_{username}_{idx}")
                 if add_proj != "—":
-                    if st.button("Copy ✓", key=f"addbtn_{_pname}_{username}_{idx}", use_container_width=True):
+                    if st.button(f"Add to {add_proj}", key=f"copybtn_{_pname}_{username}_{idx}", use_container_width=True):
                         update_pipeline(username, "Contacted", project_name=add_proj)
-                        st.toast(f"Copied to {add_proj}", icon="📁")
+                        st.toast(f"Added to {add_proj}", icon="📁")
                         st.rerun()
 
             # LinkedIn

@@ -1341,49 +1341,40 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Connections upload ──
-    st.markdown("### Network")
+    # ── Network — compact ──
     existing_connections = load_connections()
     if existing_connections:
-        st.caption(f"{len(existing_connections):,} connections loaded")
-    uploaded_files = st.file_uploader("Upload CSVs", type=["csv"], label_visibility="collapsed", accept_multiple_files=True)
-    if uploaded_files:
-        existing_set = {(c["name"].lower(), c["email"].lower()) for c in existing_connections}
-        total_added = 0
-        for uploaded in uploaded_files:
-            new_connections = parse_connections_csv_bytes(uploaded.read())
-            for c in new_connections:
-                key = (c["name"].lower(), c["email"].lower())
-                if key not in existing_set:
-                    existing_connections.append(c)
-                    existing_set.add(key)
-                    total_added += 1
-        if total_added > 0:
-            save_connections(existing_connections)
-            st.toast(f"Added {total_added:,} new connections ({len(existing_connections):,} total)", icon="📇")
-            st.rerun()
-        elif uploaded_files:
-            st.info("All connections already loaded (0 new).")
+        st.caption(f"📇 {len(existing_connections):,} connections")
+    with st.expander("Upload CSV", expanded=not bool(existing_connections)):
+        uploaded_files = st.file_uploader("CSVs", type=["csv"], label_visibility="collapsed", accept_multiple_files=True)
+        if uploaded_files:
+            existing_set = {(c["name"].lower(), c["email"].lower()) for c in existing_connections}
+            total_added = 0
+            for uploaded in uploaded_files:
+                new_connections = parse_connections_csv_bytes(uploaded.read())
+                for c in new_connections:
+                    key = (c["name"].lower(), c["email"].lower())
+                    if key not in existing_set:
+                        existing_connections.append(c)
+                        existing_set.add(key)
+                        total_added += 1
+            if total_added > 0:
+                save_connections(existing_connections)
+                st.toast(f"Added {total_added:,} new connections", icon="📇")
+                st.rerun()
+            elif uploaded_files:
+                st.info("All already loaded.")
 
-    st.divider()
-
-    # ── Settings (collapsed) ──
-    with st.expander("⚙️ Settings", expanded=False):
-        if GITHUB_TOKEN_OK:
-            st.markdown("✅ GitHub")
-        else:
-            st.markdown("❌ GitHub token missing")
-        if OPENAI_KEY_OK:
-            st.markdown("✅ OpenAI")
-        else:
-            st.markdown("❌ OpenAI key missing")
+    # ── Settings — minimal ──
+    with st.expander("⚙️", expanded=False):
+        _status = []
+        _status.append("✅ GitHub" if GITHUB_TOKEN_OK else "❌ GitHub")
+        _status.append("✅ OpenAI" if OPENAI_KEY_OK else "❌ OpenAI")
         if PROXYCURL_OK:
-            st.markdown("✅ Proxycurl")
-        else:
-            st.caption("Proxycurl not configured")
-        st.divider()
+            _status.append("✅ Proxycurl")
+        st.caption(" · ".join(_status))
         if existing_connections:
-            if st.button("🗑️ Clear all connections", use_container_width=True):
+            if st.button("Clear connections", use_container_width=True):
                 save_connections([])
                 st.rerun()
 
@@ -1429,37 +1420,19 @@ if st.session_state["current_project"] is None:
     # ─────────────────────────────────────────
     # PROJECT HOME — List all projects
     # ─────────────────────────────────────────
-    st.title("🔍 N5H")
-    st.caption("Open to work? EW")
-    st.divider()
+    st.title("N5H")
+    st.caption("Developer sourcing, simplified.")
 
-    # Create new project — prominent
-    st.markdown("### ➕ Create New Project")
-    with st.form("create_project_form"):
-        cp_col1, cp_col2 = st.columns([1, 1])
-        with cp_col1:
-            new_proj_name = st.text_input("Project Name", placeholder="e.g. Inferra ML Pipeline")
-        with cp_col2:
-            new_proj_max = st.selectbox("Default search size", [50, 100, 250, 500, 1000], index=1)
-        new_proj_jd = st.text_area(
-            "📋 Job Description / 1-Pager",
-            height=180,
-            placeholder="Paste the full JD or company brief here. This will be saved to the project and used for all searches and scoring within it.",
-        )
-        new_proj_file = st.file_uploader("Or upload a PDF / TXT", type=["pdf", "txt"], key="home_jd_upload")
-        if new_proj_file:
-            if new_proj_file.name.lower().endswith(".pdf"):
-                _extracted = extract_text_from_pdf(new_proj_file.read())
-                if _extracted and not _extracted.startswith("[PDF"):
-                    new_proj_jd = _extracted
-            else:
-                new_proj_jd = new_proj_file.read().decode("utf-8", errors="ignore")
-
-        submitted = st.form_submit_button("🚀 Create Project", type="primary", use_container_width=True)
-        if submitted and new_proj_name.strip():
-            create_project(new_proj_name.strip(), new_proj_jd.strip())
-            st.session_state["current_project"] = new_proj_name.strip()
-            st.rerun()
+    # Quick create — one line
+    _qc1, _qc2 = st.columns([3, 1])
+    with _qc1:
+        new_proj_name = st.text_input("New project", placeholder="e.g. Inferra", label_visibility="collapsed")
+    with _qc2:
+        if st.button("+ Create", type="primary", use_container_width=True):
+            if new_proj_name.strip():
+                create_project(new_proj_name.strip())
+                st.session_state["current_project"] = new_proj_name.strip()
+                st.rerun()
 
     st.divider()
 
@@ -1531,21 +1504,27 @@ else:
     _proj_jd = _proj.get("job_description", "")
     _proj_pipeline = _proj.get("candidates", {})
 
-    # ── Header bar ──
-    hdr1, hdr2 = st.columns([1, 5])
-    with hdr1:
-        if st.button("← All Projects", use_container_width=True):
-            st.session_state["current_project"] = None
-            st.rerun()
-    with hdr2:
-        st.title(f"📂 {_proj_name}")
-    _proj_created = _proj.get("created", "")
-    st.caption(f"Created {_proj_created} · {len(_proj_pipeline)} candidates")
+    # ── Clean header — one line, no clutter ──
+    _jd_tag = f'<span style="color:#22c55e;font-size:0.75rem;font-weight:600;margin-left:8px;">JD loaded</span>' if _proj_jd.strip() else '<span style="color:#f59e0b;font-size:0.75rem;font-weight:600;margin-left:8px;">No JD</span>'
+    st.markdown(
+        f'<div style="display:flex;align-items:baseline;gap:0;margin-bottom:-8px;">'
+        f'<h1 style="margin:0;padding:0;">{_proj_name}</h1>'
+        f'<span style="color:#4b5563;font-size:0.8rem;margin-left:12px;">'
+        f'{len(_proj_pipeline)} candidates</span>{_jd_tag}</div>',
+        unsafe_allow_html=True)
 
-    # ── Smart JD input — prominent when empty, collapsed when filled ──
-    if not _proj_jd.strip():
-        st.warning("⚠️ No job description yet — add one to enable AI-powered search and scoring.")
-        _edit_jd = st.text_area("📋 Paste your Job Description", height=180, key=f"edit_jd_{_proj_name}",
+    # ── Inner tabs: Search | Pipeline | JD ──
+    ws_tab_search, ws_tab_pipeline, ws_tab_jd = st.tabs(["🔍 Search", "📊 Pipeline", "📋 Job Description"])
+
+    # ══════════════════════════════════════════
+    # TAB: JD (edit job description)
+    # ══════════════════════════════════════════
+    with ws_tab_jd:
+        if _proj_jd.strip():
+            st.success(f"JD loaded — {len(_proj_jd):,} characters")
+        else:
+            st.info("No JD attached yet. Paste one below to enable AI-powered search and scoring.")
+        _edit_jd = st.text_area("Job Description", value=_proj_jd, height=300, key=f"edit_jd_{_proj_name}",
                                 placeholder="Paste the full JD, company brief, or 1-pager here…")
         _edit_jd_file = st.file_uploader("Or upload PDF/TXT", type=["pdf", "txt"], key=f"edit_jd_file_{_proj_name}")
         if _edit_jd_file:
@@ -1555,90 +1534,42 @@ else:
                     _edit_jd = _extracted
             else:
                 _edit_jd = _edit_jd_file.read().decode("utf-8", errors="ignore")
-        if st.button("💾 Save JD", key=f"save_jd_{_proj_name}", type="primary", use_container_width=True):
-            if _edit_jd.strip():
-                update_project_jd(_proj_name, _edit_jd)
-                st.toast("Job description saved!", icon="📋")
-                st.rerun()
-    else:
-        st.markdown(
-            f'<div style="font-size:0.8rem;color:#6b7280;padding:6px 10px;'
-            f'background:rgba(255,255,255,0.03);border-radius:8px;border-left:2px solid #22c55e40;">'
-            f'📋 JD loaded ({len(_proj_jd):,} chars) — '
-            f'{_proj_jd[:100].replace(chr(10)," ")}…</div>',
-            unsafe_allow_html=True)
-        with st.expander("✏️ Edit JD", expanded=False):
-            _edit_jd = st.text_area("Job Description", value=_proj_jd, height=200, key=f"edit_jd_{_proj_name}")
-            _edit_jd_file = st.file_uploader("Upload PDF/TXT to replace", type=["pdf", "txt"], key=f"edit_jd_file_{_proj_name}")
-            if _edit_jd_file:
-                if _edit_jd_file.name.lower().endswith(".pdf"):
-                    _extracted = extract_text_from_pdf(_edit_jd_file.read())
-                    if _extracted and not _extracted.startswith("[PDF"):
-                        _edit_jd = _extracted
-                else:
-                    _edit_jd = _edit_jd_file.read().decode("utf-8", errors="ignore")
-            if st.button("💾 Save JD", key=f"save_jd_{_proj_name}", use_container_width=True):
-                update_project_jd(_proj_name, _edit_jd)
-                st.toast("Job description saved!", icon="📋")
-                st.rerun()
-
-    st.divider()
-
-    # ── Inner tabs: Search | Pipeline ── (Network merged into Search)
-    ws_tab_search, ws_tab_pipeline = st.tabs(["🔍 Search", "📊 Pipeline"])
+        if st.button("Save JD", key=f"save_jd_{_proj_name}", type="primary", use_container_width=True):
+            update_project_jd(_proj_name, _edit_jd)
+            st.toast("Job description saved!", icon="📋")
+            st.rerun()
 
     # ══════════════════════════════════════════
     # TAB: SEARCH (within project workspace)
     # ══════════════════════════════════════════
     with ws_tab_search:
-        if _proj_jd:
-            st.info(f"📋 Using **{_proj_name}** JD ({len(_proj_jd):,} chars) — AI will extract roles & score candidates against it.")
-        else:
-            st.warning("⚠️ No JD attached to this project. Add one above or type a search query below.")
+        # Clean search bar — one row
+        _s1, _s2, _s3, _s4 = st.columns([3, 1.5, 1.5, 1])
+        with _s1:
+            _extra_input = st.text_input("Search", placeholder="Extra keywords (or leave blank to use JD)", key=f"extra_search_{_proj_name}", label_visibility="collapsed")
+        with _s2:
+            location_query = st.text_input("Location", placeholder="Location", key=f"loc_{_proj_name}", label_visibility="collapsed")
+        with _s3:
+            company_query = st.text_input("Company", placeholder="Company", key=f"comp_{_proj_name}", label_visibility="collapsed")
+        with _s4:
+            max_candidates = st.selectbox("Max", [50, 100, 250, 500, 1000], index=1, key=f"maxc_{_proj_name}", label_visibility="collapsed")
 
-        # Optional override / additional input
-        _extra_input = st.text_area(
-            "🔍 Additional search terms (optional — JD is already loaded)",
-            height=80, key=f"extra_search_{_proj_name}",
-            placeholder="Add extra keywords, a different role, or leave blank to use the project JD as-is.",
-        )
-
-        # Refinements row
-        with st.expander("⚙️ Refine search (optional)", expanded=False):
-            ref_col1, ref_col2, ref_col3, ref_col4 = st.columns([2, 2, 1, 1])
-            with ref_col1:
-                location_query = st.text_input("Location", placeholder="e.g. San Francisco", key=f"loc_{_proj_name}")
-            with ref_col2:
-                company_query = st.text_input("Company", placeholder="e.g. Google", key=f"comp_{_proj_name}")
-            with ref_col3:
+        # Hidden refinements
+        with st.expander("More filters", expanded=False):
+            _rf1, _rf2 = st.columns(2)
+            with _rf1:
                 seniority = st.selectbox("Seniority", list(SENIORITY_MAP.keys()), key=f"sen_{_proj_name}")
-            with ref_col4:
+            with _rf2:
                 min_followers_val = st.number_input("Min followers", min_value=0, value=0, step=50, key=f"fol_{_proj_name}")
 
-        _up_col1, _up_col2 = st.columns([3, 1])
-        with _up_col1:
-            _jd_file = st.file_uploader("Upload PDF/TXT to add to search", type=["pdf", "txt"], key=f"search_upload_{_proj_name}", label_visibility="collapsed")
-            _jd_file_text = ""
-            if _jd_file is not None:
-                _fb = _jd_file.read()
-                if _jd_file.name.lower().endswith(".pdf"):
-                    _jd_file_text = extract_text_from_pdf(_fb)
-                    if _jd_file_text and not _jd_file_text.startswith("[PDF"):
-                        st.success(f"✅ Extracted {len(_jd_file_text):,} chars from PDF")
-                else:
-                    _jd_file_text = _fb.decode("utf-8", errors="ignore")
-        with _up_col2:
-            max_candidates = st.selectbox("Candidates", [50, 100, 250, 500, 1000], index=1, key=f"maxc_{_proj_name}")
-
-        # Combine: project JD + extra input + uploaded file
+        # Combine: project JD + extra input
         _all_jd_parts = []
         if _proj_jd.strip():
             _all_jd_parts.append(_proj_jd.strip())
         if _extra_input.strip():
             _all_jd_parts.append(_extra_input.strip())
-        if _jd_file_text.strip():
-            _all_jd_parts.append(_jd_file_text.strip())
         job_description = "\n\n".join(_all_jd_parts)
+        _jd_file_text = ""
 
         role_query = ""
         sel_languages = []

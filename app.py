@@ -1714,42 +1714,55 @@ else:
                 st.warning("No users found. Try broader filters.")
                 st.stop()
 
-            users = all_users
+            # Cap users to fetch — GitHub API can't handle thousands of concurrent requests
+            # Fetch up to max_candidates * 3 to allow for filtering, capped at 1500
+            fetch_limit = min(len(all_users), max(max_candidates * 3, 300), 1500)
+            users = all_users[:fetch_limit]
+            if len(all_users) > fetch_limit:
+                st.caption(f"ℹ️ Fetching top {fetch_limit} of {len(all_users)} candidates (sorted by GitHub relevance)")
+
             st.markdown(f"### ⚡ Fetching {len(users)} profiles…")
             prog = st.progress(0)
             cache = _load_cache()
 
             def _fetch_one(user):
                 username = user["login"]
-                entry = cache.get(username)
-                if entry and time.time() - entry.get("ts", 0) < CACHE_TTL:
-                    profile = entry["data"]
-                else:
-                    profile = _fetch_user_profile(username)
-                    if profile:
-                        cache[username] = {"ts": time.time(), "data": profile}
-                if not profile:
+                try:
+                    entry = cache.get(username)
+                    if entry and time.time() - entry.get("ts", 0) < CACHE_TTL:
+                        profile = entry["data"]
+                    else:
+                        profile = _fetch_user_profile(username)
+                        if profile:
+                            cache[username] = {"ts": time.time(), "data": profile}
+                    if not profile:
+                        return None
+                    user_repos = get_user_repos(username)
+                    languages = get_user_languages(username, repos=user_repos)
+                    return {
+                        "contributor": {"contributions": 0, "login": username},
+                        "profile": profile,
+                        "user_repos": user_repos,
+                        "languages": languages,
+                        "score": None,
+                        "reason": "",
+                        "conclusion": "",
+                    }
+                except Exception:
                     return None
-                user_repos = get_user_repos(username)
-                languages = get_user_languages(username, repos=user_repos)
-                return {
-                    "contributor": {"contributions": 0, "login": username},
-                    "profile": profile,
-                    "user_repos": user_repos,
-                    "languages": languages,
-                    "score": None,
-                    "reason": "",
-                    "conclusion": "",
-                }
 
             candidates = []
             done = 0
-            with ThreadPoolExecutor(max_workers=25) as executor:
+            # Use 15 workers to avoid overwhelming connections
+            with ThreadPoolExecutor(max_workers=15) as executor:
                 futures = {executor.submit(_fetch_one, u): u for u in users}
                 for future in as_completed(futures):
                     done += 1
                     prog.progress(done / len(users))
-                    result = future.result()
+                    try:
+                        result = future.result()
+                    except Exception:
+                        result = None
                     if result:
                         candidates.append(result)
             prog.empty()

@@ -1395,7 +1395,7 @@ with st.sidebar:
 
 # ── Search Mode ───────────────────────────────
 search_mode = st.radio(
-    "mode", ["🔍 Search", "📇 My Network"],
+    "mode", ["🔍 Search", "📇 My Network", "📁 Projects"],
     horizontal=True, label_visibility="collapsed",
 )
 st.markdown("")
@@ -2130,6 +2130,292 @@ elif search_mode == "📇 My Network":
                 if st.button("Next ▶", disabled=current_page >= total_pages - 1, key="net_next_b", use_container_width=True):
                     st.session_state["net_page"] += 1
                     st.rerun()
+
+# ── Projects Pipeline View ────────────────────
+elif search_mode == "📁 Projects":
+    proj_data = load_projects()
+    all_proj_names = list(proj_data.get("projects", {}).keys())
+
+    if not all_proj_names:
+        st.info("No projects yet. Create one in the sidebar.")
+    else:
+        # Build a lookup of connection data for enriching pipeline entries
+        _conn_lookup = {}
+        try:
+            _all_conns = load_connections()
+            for _c in _all_conns:
+                _ckey = f"conn_{_c.get('name','').lower().replace(' ','_')}"
+                _conn_lookup[_ckey] = _c
+        except Exception:
+            pass
+
+        # Build a lookup from cached search results
+        _search_lookup = {}
+        for _sr in st.session_state.get("results", []):
+            _login = _sr.get("profile", {}).get("login", "")
+            if _login:
+                _search_lookup[_login] = _sr
+
+        # Project selector — clickable buttons in a row
+        st.markdown("### 📁 Select a Project")
+        proj_cols = st.columns(min(len(all_proj_names), 5))
+        view_project = st.session_state.get("view_project", get_active_project_name(proj_data))
+        for pi, pname in enumerate(all_proj_names):
+            col_idx = pi % min(len(all_proj_names), 5)
+            with proj_cols[col_idx]:
+                p_candidates = proj_data["projects"][pname].get("candidates", {})
+                p_count = len(p_candidates)
+                is_active = (pname == view_project)
+                btn_type = "primary" if is_active else "secondary"
+                if st.button(
+                    f"{'📂' if is_active else '📁'} {pname} ({p_count})",
+                    key=f"proj_view_{pi}",
+                    type=btn_type,
+                    use_container_width=True,
+                ):
+                    st.session_state["view_project"] = pname
+                    st.rerun()
+
+        st.markdown("")
+
+        # Show the selected project's pipeline
+        if view_project not in proj_data["projects"]:
+            view_project = all_proj_names[0]
+
+        project = proj_data["projects"][view_project]
+        candidates_in_project = project.get("candidates", {})
+        created = project.get("created", "")
+
+        st.markdown(
+            f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">'
+            f'<h2 style="margin:0;">📂 {view_project}</h2>'
+            f'<span style="color:#6b7280;font-size:0.85rem;">Created {created} · '
+            f'{len(candidates_in_project)} candidate{"s" if len(candidates_in_project) != 1 else ""}</span></div>',
+            unsafe_allow_html=True,
+        )
+
+        if not candidates_in_project:
+            st.info("No candidates in this project yet. Add candidates from Search or My Network.")
+        else:
+            # Group by stage
+            stage_groups = {s: [] for s in PIPELINE_STAGES[1:]}
+            for cand_key, cand_data in candidates_in_project.items():
+                stage = cand_data.get("stage", "Contacted")
+                if stage not in stage_groups:
+                    stage_groups[stage] = []
+                stage_groups[stage].append((cand_key, cand_data))
+
+            # Kanban-style columns for each stage
+            active_stages = [s for s in PIPELINE_STAGES[1:] if stage_groups.get(s)]
+            if active_stages:
+                stage_tabs = st.tabs([f"{s} ({len(stage_groups[s])})" for s in active_stages])
+                for tab, stage_name in zip(stage_tabs, active_stages):
+                    with tab:
+                        colour, bg = STAGE_STYLE.get(stage_name, ("#9ca3af", "rgba(156,163,175,0.08)"))
+                        st.markdown(
+                            f'<div style="background:{bg};border-left:3px solid {colour};'
+                            f'padding:8px 14px;border-radius:8px;margin-bottom:12px;'
+                            f'font-weight:700;color:{colour};font-size:1rem;">'
+                            f'{stage_name} — {len(stage_groups[stage_name])} candidate{"s" if len(stage_groups[stage_name]) != 1 else ""}</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                        for ci, (cand_key, cand_data) in enumerate(stage_groups[stage_name]):
+                            updated = cand_data.get("updated", "")
+
+                            # Try to resolve candidate details
+                            name = cand_key
+                            title = ""
+                            company = ""
+                            location = ""
+                            linkedin_url = ""
+                            email = ""
+                            avatar_url = ""
+                            score = None
+                            conclusion = ""
+
+                            # Check network connections first
+                            if cand_key in _conn_lookup:
+                                conn = _conn_lookup[cand_key]
+                                name = conn.get("name", cand_key)
+                                title = conn.get("title", "")
+                                company = conn.get("company", "")
+                                location = conn.get("location", "")
+                                linkedin_url = conn.get("linkedin_url", "")
+                                email = conn.get("email", "")
+                            # Check search results
+                            elif cand_key in _search_lookup:
+                                sr = _search_lookup[cand_key]
+                                profile = sr.get("profile", {})
+                                name = profile.get("name") or profile.get("login", cand_key)
+                                title = profile.get("bio", "")
+                                company = (profile.get("company") or "").strip("@ ")
+                                location = profile.get("location", "")
+                                avatar_url = profile.get("avatar_url", "")
+                                email = profile.get("email", "")
+                                score = sr.get("score")
+                                conclusion = sr.get("conclusion", "")
+                            else:
+                                # Format conn_ keys nicely
+                                if cand_key.startswith("conn_"):
+                                    name = cand_key[5:].replace("_", " ").title()
+
+                            with st.container():
+                                card_col1, card_col2, card_col3 = st.columns([1, 4, 2])
+
+                                with card_col1:
+                                    if avatar_url:
+                                        st.markdown(
+                                            f'<img src="{avatar_url}" style="width:48px;height:48px;'
+                                            f'border-radius:50%;border:2px solid {colour}40;">',
+                                            unsafe_allow_html=True,
+                                        )
+                                    elif score is not None:
+                                        s_color = "#22c55e" if score >= 7 else "#60a5fa" if score >= 5 else "#f59e0b" if score >= 3 else "#ef4444"
+                                        st.markdown(
+                                            f'<div style="display:inline-block;background:{s_color}18;color:{s_color};'
+                                            f'font-size:1.1rem;font-weight:800;padding:8px 12px;border-radius:10px;'
+                                            f'border:1px solid {s_color}40;text-align:center;min-width:48px;">'
+                                            f'{score}</div>',
+                                            unsafe_allow_html=True,
+                                        )
+                                    else:
+                                        st.markdown(
+                                            f'<div style="width:48px;height:48px;border-radius:50%;'
+                                            f'background:{bg};border:2px solid {colour}40;display:flex;'
+                                            f'align-items:center;justify-content:center;font-size:1.2rem;'
+                                            f'font-weight:700;color:{colour};">'
+                                            f'{name[0].upper() if name else "?"}</div>',
+                                            unsafe_allow_html=True,
+                                        )
+
+                                with card_col2:
+                                    # Name with LinkedIn link
+                                    if linkedin_url:
+                                        st.markdown(
+                                            f'<h4 style="margin:0;"><a href="{linkedin_url}" target="_blank" '
+                                            f'style="color:#60a5fa;text-decoration:none;">{name} 🔗</a></h4>',
+                                            unsafe_allow_html=True,
+                                        )
+                                    elif cand_key in _search_lookup:
+                                        gh_url = f"https://github.com/{cand_key}"
+                                        st.markdown(
+                                            f'<h4 style="margin:0;"><a href="{gh_url}" target="_blank" '
+                                            f'style="color:#60a5fa;text-decoration:none;">{name} <span style="font-size:0.7em;">GitHub</span></a></h4>',
+                                            unsafe_allow_html=True,
+                                        )
+                                    else:
+                                        st.markdown(f"#### {name}")
+
+                                    # Details row
+                                    details = []
+                                    if title:
+                                        details.append(title)
+                                    if company:
+                                        details.append(f"🏢 {company}")
+                                    if location:
+                                        details.append(f"📍 {location}")
+                                    if details:
+                                        st.caption(" · ".join(details))
+
+                                    if email:
+                                        st.markdown(f"✉️ [{email}](mailto:{email})")
+
+                                    if conclusion:
+                                        st.markdown(
+                                            f'<div style="font-size:0.75rem;color:#9ca3af;line-height:1.4;'
+                                            f'margin:4px 0;padding:6px 8px;background:rgba(255,255,255,0.03);'
+                                            f'border-radius:8px;border-left:2px solid {colour}40;">'
+                                            f'{conclusion}</div>',
+                                            unsafe_allow_html=True,
+                                        )
+
+                                    st.markdown(
+                                        f'<span style="font-size:0.7rem;color:#6b7280;">Updated: {updated}</span>',
+                                        unsafe_allow_html=True,
+                                    )
+
+                                with card_col3:
+                                    # Move to different stage
+                                    current_stage_idx = PIPELINE_STAGES.index(stage_name) if stage_name in PIPELINE_STAGES else 0
+                                    new_stage = st.selectbox(
+                                        "Move to",
+                                        PIPELINE_STAGES,
+                                        index=current_stage_idx,
+                                        key=f"proj_stage_{view_project}_{cand_key}_{ci}",
+                                    )
+                                    if new_stage != stage_name:
+                                        update_pipeline(cand_key, new_stage, project_name=view_project)
+                                        st.rerun()
+
+                                    # Move to another project
+                                    other_projs = [p for p in all_proj_names if p != view_project]
+                                    if other_projs:
+                                        move_proj = st.selectbox(
+                                            "Copy to project",
+                                            ["—"] + other_projs,
+                                            key=f"proj_move_{view_project}_{cand_key}_{ci}",
+                                        )
+                                        if move_proj != "—":
+                                            if st.button("Copy ✓", key=f"proj_movebtn_{view_project}_{cand_key}_{ci}", use_container_width=True):
+                                                update_pipeline(cand_key, stage_name, project_name=move_proj)
+                                                st.toast(f"Copied to {move_proj}", icon="📁")
+                                                st.rerun()
+
+                                    # Remove from project
+                                    if st.button("❌ Remove", key=f"proj_rm_{view_project}_{cand_key}_{ci}", use_container_width=True):
+                                        update_pipeline(cand_key, "New", project_name=view_project)
+                                        st.toast(f"Removed from {view_project}", icon="🗑️")
+                                        st.rerun()
+
+                                    # Notes
+                                    existing_note = st.session_state["notes"].get(cand_key, "")
+                                    new_note = st.text_area(
+                                        "📝", value=existing_note, height=50,
+                                        key=f"proj_note_{view_project}_{cand_key}_{ci}",
+                                        placeholder="Notes...",
+                                    )
+                                    if st.button("💾", key=f"proj_nsave_{view_project}_{cand_key}_{ci}"):
+                                        persist_note(cand_key, new_note)
+                                        st.session_state["notes"][cand_key] = new_note
+                                        st.toast("Saved!", icon="📝")
+
+                            st.divider()
+
+            # Export project pipeline as CSV
+            st.markdown("")
+            proj_csv = io.StringIO()
+            pw = csv.writer(proj_csv)
+            pw.writerow(["Name", "Stage", "Updated", "Title", "Company", "Location", "Email", "LinkedIn"])
+            for cand_key, cand_data in candidates_in_project.items():
+                _name = cand_key
+                _title = _company = _location = _email = _linkedin = ""
+                if cand_key in _conn_lookup:
+                    c = _conn_lookup[cand_key]
+                    _name = c.get("name", cand_key)
+                    _title = c.get("title", "")
+                    _company = c.get("company", "")
+                    _location = c.get("location", "")
+                    _email = c.get("email", "")
+                    _linkedin = c.get("linkedin_url", "")
+                elif cand_key in _search_lookup:
+                    p = _search_lookup[cand_key].get("profile", {})
+                    _name = p.get("name") or p.get("login", cand_key)
+                    _title = p.get("bio", "")
+                    _company = (p.get("company") or "").strip("@ ")
+                    _location = p.get("location", "")
+                    _email = p.get("email", "")
+                elif cand_key.startswith("conn_"):
+                    _name = cand_key[5:].replace("_", " ").title()
+                pw.writerow([_name, cand_data.get("stage", ""), cand_data.get("updated", ""),
+                             _title, _company, _location, _email, _linkedin])
+            st.download_button(
+                f"⬇️ Export {view_project} Pipeline",
+                proj_csv.getvalue().encode("utf-8"),
+                f"n5h_{view_project.replace(' ','_')}_pipeline.csv",
+                "text/csv",
+                use_container_width=True,
+            )
 
 # ── Results ───────────────────────────────────
 if "results" in st.session_state and st.session_state["results"]:

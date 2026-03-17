@@ -1168,7 +1168,9 @@ def render_candidate(c, idx, role_query, pipeline, connections=None, project_nam
             )
             net_badge = ""
             conn_match = None
-            if connections:
+            _conn_data = c.get("_conn_data")  # For network-sourced candidates
+
+            if connections and not _conn_data:
                 conn_match = find_connection_match(
                     connections,
                     name=profile.get("name") or "",
@@ -1176,7 +1178,16 @@ def render_candidate(c, idx, role_query, pipeline, connections=None, project_nam
                 )
                 if conn_match:
                     net_badge = connection_badge()
-            linkedin_url = conn_match.get("linkedin_url") if conn_match else None
+
+            # Determine the best link for this candidate
+            linkedin_url = None
+            if _conn_data:
+                linkedin_url = _conn_data.get("linkedin_url") or ""
+            elif conn_match:
+                linkedin_url = conn_match.get("linkedin_url") or ""
+
+            _is_network_source = _source == "network"
+
             if linkedin_url:
                 st.markdown(
                     f'<h3 style="margin:0;padding:0;"><a href="{linkedin_url}" target="_blank" '
@@ -1184,28 +1195,47 @@ def render_candidate(c, idx, role_query, pipeline, connections=None, project_nam
                     f'<span style="font-size:0.6em;vertical-align:middle;">🔗</span></a>'
                     f'{source_badge}{otw_badge}{net_badge}</h3>',
                     unsafe_allow_html=True)
-            else:
+            elif not _is_network_source:
+                # GitHub candidate — link to GitHub
                 st.markdown(
                     f'<h3 style="margin:0;padding:0;"><a href="https://github.com/{username}" target="_blank" '
                     f'style="color:#e0e0e0;text-decoration:none;">{name}</a>'
                     f'{source_badge}{otw_badge}{net_badge}</h3>',
                     unsafe_allow_html=True)
-            if conn_match:
+            else:
+                # Network candidate with no LinkedIn — plain name
+                st.markdown(
+                    f'<h3 style="margin:0;padding:0;">{name}'
+                    f'{source_badge}{otw_badge}{net_badge}</h3>',
+                    unsafe_allow_html=True)
+
+            # Show network connection details
+            _detail_source = _conn_data or conn_match
+            if _detail_source:
                 conn_details = []
-                if conn_match.get("title"):   conn_details.append(conn_match["title"])
-                if conn_match.get("company"): conn_details.append(conn_match["company"])
-                if conn_match.get("phone"):   conn_details.append(f"📞 {conn_match['phone']}")
-                if conn_match.get("email"):   conn_details.append(f"✉️ {conn_match['email']}")
+                if _detail_source.get("title"):   conn_details.append(_detail_source["title"])
+                if _detail_source.get("company"): conn_details.append(_detail_source["company"])
+                if _detail_source.get("phone"):   conn_details.append(f"📞 {_detail_source['phone']}")
+                if _detail_source.get("email"):   conn_details.append(f"✉️ {_detail_source['email']}")
                 if conn_details:
                     st.caption("**From your network:** " + "  ·  ".join(conn_details))
             if profile.get("bio"):
                 st.caption(profile["bio"])
 
-            s1, s2, s3, s4 = st.columns(4)
-            s1.metric("Repos",     profile.get("public_repos", 0))
-            s2.metric("Followers", profile.get("followers", 0))
-            s3.metric("Contribs",  contributor.get("contributions", 0))
-            s4.metric("Acc. Age",  fmt_age(profile))
+            # Metrics — show different data for network vs GitHub candidates
+            if _is_network_source and _conn_data:
+                # Network candidate: show relevant info instead of GitHub stats
+                s1, s2, s3, s4 = st.columns(4)
+                s1.metric("Company", (_conn_data.get("company") or "—")[:15])
+                s2.metric("Location", (_conn_data.get("location") or "—")[:15])
+                s3.metric("Tier", (_conn_data.get("tier") or "—").title())
+                s4.metric("Relationship", (_conn_data.get("relationship") or "—").title())
+            else:
+                s1, s2, s3, s4 = st.columns(4)
+                s1.metric("Repos",     profile.get("public_repos", 0))
+                s2.metric("Followers", profile.get("followers", 0))
+                s3.metric("Contribs",  contributor.get("contributions", 0))
+                s4.metric("Acc. Age",  fmt_age(profile))
 
             meta = []
             if profile.get("location"): meta.append(f"📍 {profile['location']}")
@@ -1223,6 +1253,14 @@ def render_candidate(c, idx, role_query, pipeline, connections=None, project_nam
                 if not blog.startswith("http"):
                     blog = "https://" + blog
                 contact.append(f"🔗 [{profile['blog']}]({blog})")
+            # Add LinkedIn from any source
+            _li_for_contact = None
+            if _conn_data and _conn_data.get("linkedin_url"):
+                _li_for_contact = _conn_data["linkedin_url"]
+            elif conn_match and conn_match.get("linkedin_url"):
+                _li_for_contact = conn_match["linkedin_url"]
+            if _li_for_contact:
+                contact.append(f"🔗 [LinkedIn]({_li_for_contact})")
             if contact:
                 st.markdown("  ·  ".join(contact))
 
@@ -1283,8 +1321,12 @@ def render_candidate(c, idx, role_query, pipeline, connections=None, project_nam
                             st.toast(f"Added to {add_proj}", icon="📁")
                         st.rerun()
 
-            # LinkedIn
-            li_url_direct = conn_match.get("linkedin_url") if conn_match else None
+            # LinkedIn — check all possible sources
+            li_url_direct = None
+            if _conn_data and _conn_data.get("linkedin_url"):
+                li_url_direct = _conn_data["linkedin_url"]
+            elif conn_match and conn_match.get("linkedin_url"):
+                li_url_direct = conn_match["linkedin_url"]
             if li_url_direct:
                 st.markdown(
                     f'<a href="{li_url_direct}" target="_blank" style="display:block;text-align:center;padding:8px 12px;'

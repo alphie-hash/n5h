@@ -1484,26 +1484,40 @@ with st.sidebar:
     hide_contacted = False
 
     if _rk in st.session_state and st.session_state[_rk]:
-        st.markdown("### 🎛️ Refine Results")
+        st.markdown(
+            '<p style="font-size:0.85rem;font-weight:700;color:#e0e0e0;margin:0 0 8px 0;'
+            'letter-spacing:0.05em;">FILTERS</p>',
+            unsafe_allow_html=True)
+
         _all_langs = sorted({l for c in st.session_state[_rk] for l in c.get("languages", [])})
         _all_companies = sorted({
             (c["profile"].get("company") or "").strip("@ ").strip()
             for c in st.session_state[_rk]
             if (c["profile"].get("company") or "").strip()
         })
-        filter_open_only = st.toggle("🟢 Open to work only", value=False)
-        hide_contacted = st.toggle("👻 Hide already contacted", value=False)
-        hide_archived = st.toggle("🗂️ Hide archived", value=True)
-        filter_langs = st.multiselect("Language", _all_langs)
-        filter_location = st.text_input("📍 Location contains", placeholder="e.g. San Francisco")
-        filter_company = st.text_input("🏢 Company contains", placeholder="e.g. Meta")
+
+        # Quick toggles — compact row
+        _t1, _t2 = st.columns(2)
+        with _t1:
+            filter_open_only = st.checkbox("Open to work", value=False, key=f"otw_{_proj_name}")
+        with _t2:
+            hide_contacted = st.checkbox("Hide contacted", value=False, key=f"hc_{_proj_name}")
+        hide_archived = st.checkbox("Hide archived", value=True, key=f"ha_{_proj_name}")
+
+        # Search filters
+        filter_location = st.text_input("Location", placeholder="e.g. San Francisco", key=f"fl_{_proj_name}")
+        filter_company = st.text_input("Company", placeholder="e.g. Meta", key=f"fc_{_proj_name}")
         if _all_companies:
-            filter_company_select = st.multiselect("🏢 Or pick companies", _all_companies)
+            filter_company_select = st.multiselect("Pick companies", _all_companies, key=f"fcs_{_proj_name}")
+        if _all_langs:
+            filter_langs = st.multiselect("Languages", _all_langs, key=f"fla_{_proj_name}")
+
         _has_scores = any(c["score"] is not None for c in st.session_state[_rk])
         if _has_scores:
-            filter_min_score = st.slider("Min score", 0.0, 10.0, 0.0, 0.5)
-        sort_by = st.selectbox("Sort by", ["Score", "Followers", "Contributions", "Account Age"])
-        st.divider()
+            filter_min_score = st.slider("Min score", 0.0, 10.0, 0.0, 0.5, key=f"fms_{_proj_name}")
+
+        sort_by = st.selectbox("Sort by", ["Score", "Followers", "Contributions", "Account Age"], key=f"sb_{_proj_name}")
+        st.markdown("---")
 
 # ═════════════════════════════════════════════
 # MAIN CONTENT AREA
